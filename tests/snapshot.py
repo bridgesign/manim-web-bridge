@@ -23,11 +23,15 @@ async def main(page_path: Path, out: Path, width: int, only=None, film=None, eve
         page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
         if only is not None or film is not None:
             # "#n" jumps to the end of step n without playing anything
-            await page.goto(page_path.resolve().as_uri() + f"#{max(0, (film or 1) - 1) if film is not None else 0}")
+            # film 0: load without a hash (step 0 autoplays); film n: jump to the
+            # end of step n-1, then play step n
+            hash_ = "" if film == 0 else f"#{film - 1 if film is not None else 0}"
+            await page.goto(page_path.resolve().as_uri() + hash_)
             await page.wait_for_function("window.bridge", timeout=60000)
-            await page.wait_for_timeout(300)
+            if film:
+                await page.wait_for_timeout(300)
+                await page.evaluate("window.bridge.next()")
             if film is not None:
-                await page.evaluate("window.bridge.next()" if film > 0 else "window.bridge.jump(0)")
                 for k in range(count):
                     await page.wait_for_timeout(every * 1000)
                     await page.screenshot(path=str(out / f"film_{film:03d}_{k:02d}.png"))
