@@ -16,16 +16,21 @@ VideoMobject: a video placed in the scene like an image.
 
 In Python it is just a filled rectangle with the clip's aspect ratio, so
 layout, fades and moves behave like any mobject. The recorder embeds the
-clip once (as WebM) and the player draws its current frame into that
-rectangle; it starts from the beginning when it comes on screen and pauses
-when it leaves. Clips are muted (browsers only autoplay muted media).
+clip once and the player draws its current frame into that rectangle; it
+starts from the beginning when it comes on screen and pauses when it leaves.
 
-Encoding: the embedded file is always VP9 WebM (plays in Chromium, Firefox,
-Edge, VS Code and recent Safari). A .webm source with no options is used
-as-is; anything else (other formats, crop, trim, resize, speed, fps) is
-re-encoded with ffmpeg -- taken from PATH, or from the optional
-`imageio-ffmpeg` package -- and cached by content + options, so rebuilding a
-deck does not re-encode.
+Two ways to embed (`embed=`):
+  "frames" (default)  the clip is decoded at build time (PyAV, which manim
+                      already uses) into WebP images that the player flips
+                      on the canvas. Works in EVERY viewer, including VS
+                      Code's built-in browser, whose stripped-down media
+                      stack cannot decode common video codecs. No ffmpeg.
+  "webm"              a real VP9 WebM played by the browser's <video>:
+                      smaller for long clips, but needs a browser with full
+                      codecs (Chrome, Firefox, Edge; not VS Code). Converting
+                      needs ffmpeg (PATH or the optional `imageio-ffmpeg`).
+Both are cached by source content + options, so rebuilding does not
+re-encode.
 """
 
 import hashlib
@@ -102,12 +107,78 @@ def encode_webm(source: Path, crop=None, trim=None, height: int = 720, fps=None,
     return out, meta
 
 
+def decode_frames(source: Path, crop=None, trim=None, height: int = 720, fps: float = 15,
+                  speed: float = 1.0, quality: int = 80) -> tuple[list[Path], dict]:
+    """Decode `source` into WebP frames at `fps` (of the OUTPUT timeline,
+    after trim and speed), cropped and scaled like encode_webm. Cached.
+    Returns (frame paths, {"w", "h", "seconds", "fps"})."""
+    import av
+    from PIL import Image
+
+    source = Path(source).resolve()
+    options = {"crop": crop, "trim": trim, "height": height, "fps": fps, "speed": speed, "q": quality}
+    key = hashlib.sha1(source.read_bytes() + json.dumps(options, sort_keys=True).encode()).hexdigest()[:20]
+    folder = CACHE_DIR / f"{key}_frames"
+    meta_path = folder / "meta.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        return [folder / name for name in meta["files"]], meta
+
+    t_start, t_end = trim if trim else (0.0, float("inf"))
+    frames, last_index = [], -1
+    folder.mkdir(parents=True, exist_ok=True)
+    with av.open(str(source)) as container:
+        for frame in container.decode(video=0):
+            t = float(frame.time or 0.0)
+            if t < t_start:
+                continue
+            if t > t_end:
+                break
+            # sample the output timeline at `fps`: keep the first source frame
+            # for each output frame index (container timestamps are rounded,
+            # so compare indices, not times)
+            index = round((t - t_start) / speed * fps)
+            if index <= last_index:
+                continue
+            img = frame.to_image()
+            if crop:
+                x, y, w, h = crop
+                W, H = img.size
+                img = img.crop((round(x * W), round(y * H), round((x + w) * W), round((y + h) * H)))
+            if height and img.height != height:
+                img = img.resize((round(img.width * height / img.height), height), Image.LANCZOS)
+            path = folder / f"{len(frames):05d}.webp"
+            img.save(path, "WEBP", quality=quality, method=6)
+            frames.extend([path] * (index - last_index))   # repeat a frame if the source skipped ahead
+            last_index = index
+    w, h = Image.open(frames[0]).size
+    meta = {"w": w, "h": h, "seconds": len(frames) / fps, "fps": fps, "count": len(frames),
+            "files": [p.name for p in frames]}
+    meta_path.write_text(json.dumps(meta))
+    return frames, meta
+
+
 class VideoMobject(Rectangle):
     """A video clip on the slide; see the module docstring for the options."""
 
     def __init__(self, source, width: float = 8.0, *, crop=None, trim=None, height: int = 720,
-                 fps=None, speed: float = 1.0, loop: bool = False, crf: int = 34, **kwargs):
+                 fps=None, speed: float = 1.0, loop: bool = False, crf: int = 34,
+                 embed: str = "frames", quality: int = 70, **kwargs):
         source = Path(source)
+        self.video_loop = loop
+        self.video_frames = None
+        if embed == "frames":
+            frames, meta = decode_frames(source, crop, trim, height, fps or 15, speed, quality)
+            self.video_frames, self.video_fps = [str(p) for p in frames], meta["fps"]
+            self.video_path = str(Path(frames[0]).parent)    # identifies the clip
+            self.video_seconds = meta["seconds"]
+            kwargs.setdefault("stroke_width", 0)
+            kwargs.setdefault("fill_color", "#000000")
+            kwargs.setdefault("fill_opacity", 1.0)
+            super().__init__(width=width, height=width * meta["h"] / meta["w"], **kwargs)
+            return
+        if embed != "webm":
+            raise ValueError(f"embed must be 'frames' or 'webm', not {embed!r}")
         meta = None
         if source.suffix.lower() == ".webm" and not (crop or trim or fps or speed != 1.0):
             meta = probe(source)                       # a WebM that is already small enough
@@ -118,7 +189,6 @@ class VideoMobject(Rectangle):
         else:
             path, meta = encode_webm(source, crop, trim, height, fps, speed, crf)
             self.video_path = str(path)
-        self.video_loop = loop
         self.video_seconds = meta["seconds"]          # handy for deck.wait(...)
         kwargs.setdefault("stroke_width", 0)
         kwargs.setdefault("fill_color", "#000000")

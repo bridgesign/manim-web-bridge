@@ -36,7 +36,7 @@ running step), ← / PageUp = previous, Home / End, `f` = fullscreen.
 | --- | --- |
 | Python | `manim>=0.19,<0.20` only (numpy, pillow come with it). LaTeX only if the scene uses `Tex`/`MathTex`, as in plain manim. |
 | Browser | nothing — `player.js` is plain JavaScript on a `<canvas>` |
-| Video (optional) | ffmpeg — on PATH, or `pip install manim-web-bridge[video]` (imageio-ffmpeg) — only to convert/crop/trim clips for `VideoMobject` |
+| Video (optional) | nothing for `VideoMobject(embed="frames")`; ffmpeg (PATH or `pip install manim-web-bridge[video]`) only for `embed="webm"` |
 | Tests (optional) | `playwright` + Chromium (`python -m playwright install chromium`) |
 
 Keep it that way: **do not add dependencies** without a strong reason.
@@ -104,16 +104,23 @@ from manim_web_bridge import VideoMobject
 clip = VideoMobject("replay.webm", width=7.0,
                     crop=(0.30, 0.10, 0.48, 0.65),  # zoom: (x, y, w, h) fractions of the frame
                     trim=(0.0, 4.0),                # cut: source seconds
-                    speed=0.5, height=720, fps=None, loop=True, crf=34)
+                    speed=0.5, height=720, fps=15, loop=True,
+                    embed="frames")                 # or "webm"
 self.play(FadeIn(clip)); self.wait(clip.video_seconds)
 ```
 
 A rectangle in Python (so layout, fades and moves work); the player draws the
-clip's frames into it, restarting it when it comes on screen and pausing it
-when it leaves. Clips are always embedded as muted VP9 **WebM** (plays in
-Chromium, Firefox, Edge, VS Code, recent Safari). A `.webm` source with no
-options is embedded as-is; anything else is re-encoded with ffmpeg and cached
-in `~/.cache/manim-web-bridge/video/` by content + options.
+clip into it, restarting it when it comes on screen and pausing it when it
+leaves. Two ways to embed:
+
+| `embed=` | What is embedded | Plays in | Needs |
+| --- | --- | --- | --- |
+| `"frames"` (default) | WebP images, flipped by the player | **every** viewer, incl. VS Code's built-in browser | nothing extra (PyAV comes with manim) |
+| `"webm"` | VP9 WebM in a muted `<video>` | Chrome, Firefox, Edge — **not** VS Code (its media stack lacks the codecs) | ffmpeg to convert (PATH or `[video]` extra) |
+
+`"frames"` is larger per second (one image per frame), so keep clips short
+(crop + trim). Both are cached in `~/.cache/manim-web-bridge/video/` by source
+content + options.
 
 ## Files
 
@@ -123,7 +130,7 @@ in `~/.cache/manim-web-bridge/video/` by content + options.
 | `manim_web_bridge/recorder.py` | records `play`/`wait`/`next_slide` into steps |
 | `manim_web_bridge/geometry.py` | mobject → state (points, style, images) |
 | `manim_web_bridge/export.py` | writes the HTML page |
-| `manim_web_bridge/media.py` | `VideoMobject`: video clips (WebM, crop/trim/scale/speed/loop) |
+| `manim_web_bridge/media.py` | `VideoMobject`: clips as WebP frames or WebM (crop/trim/scale/speed/loop) |
 | `manim_web_bridge/player.js` | canvas player (drawing, interpolation, navigation) |
 | `manim_web_bridge/__main__.py` | CLI: `python -m manim_web_bridge file.py Scene [out.html]` |
 | `examples/demo.py` | one scene exercising every recording path |
@@ -149,7 +156,7 @@ Delete screenshot folders afterwards.
   or approximated.
 - Text and LaTeX become outlines (not selectable in the page). Each glyph size is its own
   outline, so text-heavy decks are a few MB even compressed.
-- Images (`ImageMobject`) are embedded as PNG and clips (`VideoMobject`) as WebM; everything else is vector, drawn on the canvas.
+- Images (`ImageMobject`) are embedded as PNG and clips (`VideoMobject`) as WebP frames (or WebM); everything else is vector, drawn on the canvas.
 - `frames` fallback stores every changed leaf per frame: long updater-driven
   animations of many shapes make big files. Prefer tweens where you can.
 - Python-side `wait()` without updaters is just a pause; with updaters it is sampled.

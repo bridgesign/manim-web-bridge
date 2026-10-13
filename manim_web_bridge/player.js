@@ -44,7 +44,28 @@ window.addEventListener("resize", resize);
 // ---------------------------------------------------------------------------
 const images = DATA.images.map((src) => { const im = new Image(); im.onload = () => draw(); im.src = src; return im; });
 // Videos (VideoMobject): muted so the browser lets them autoplay.
+// A frame-sequence clip ({frames: [...], fps, loop}) behaves like a <video>:
+// play/pause/currentTime, plus frame() for the image to draw now.
+function framePlayer({ frames, seq, fps, loop }) {
+  const imgs = frames.map((src) => { const im = new Image(); im.onload = () => draw(); im.src = src; return im; });
+  let t0 = 0, at = 0, playing = false;
+  const clock = () => performance.now() / 1000;
+  return {
+    get readyState() { return imgs[0].complete ? 4 : 0; },
+    get paused() { return !playing; },
+    get currentTime() { return playing ? clock() - t0 : at; },
+    set currentTime(v) { at = v; t0 = clock() - v; },
+    play() { t0 = clock() - at; playing = true; return Promise.resolve(); },
+    pause() { at = this.currentTime; playing = false; },
+    frame() {
+      const order = seq || imgs.map((_, k) => k), i = Math.floor(this.currentTime * fps);
+      return imgs[order[loop ? i % order.length : Math.min(i, order.length - 1)]];
+    },
+  };
+}
+
 const videos = (DATA.videos || []).map((entry) => {
+  if (entry.frames) return framePlayer(entry);
   const { src, loop } = typeof entry === "string" ? { src: entry, loop: false } : entry;
   const v = document.createElement("video");
   Object.assign(v, { src, loop, muted: true, playsInline: true, preload: "auto" });
@@ -80,8 +101,9 @@ function tracePath(p) {
 
 function paint(look) {
   if (look.img !== undefined || look.vid !== undefined) {
-    const im = look.img !== undefined ? images[look.img] : videos[look.vid];
-    const ready = look.img !== undefined ? im.complete : im.readyState >= 2;
+    const v = look.vid !== undefined ? videos[look.vid] : null;
+    const im = v ? (v.frame ? v.frame() : v) : images[look.img];
+    const ready = v ? v.readyState >= 2 && (!v.frame || im.complete) : im.complete;
     if (!ready || look.o <= 0) return;
     ctx.save();
     ctx.globalAlpha = look.o;
@@ -319,7 +341,7 @@ document.addEventListener("keydown", (e) => {
 canvas.addEventListener("click", next);
 
 // for tests / automation
-window.bridge = { next, prev, jump, steps: DATA.steps.length, get current() { return current; } };
+window.bridge = { next, prev, jump, steps: DATA.steps.length, get current() { return current; }, _videos: videos };
 
 resize();
 const fromHash = parseInt(location.hash.slice(1), 10);

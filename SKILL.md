@@ -41,7 +41,7 @@ Open the PNGs and actually look. Compare with what manim would render
 | Timing off with lag / LaggedStart | `_plan()` windows vs manim `get_sub_alpha` / `anims_with_timings` |
 | Huge file | `frames` commands; inspect `data["steps"][i]["cmds"]` ops |
 | Page blank | browser console via `tests/snapshot.py`; old browsers lack `DecompressionStream` -> export with `write_html(..., compress=False)` |
-| Video does not play | it must be WebM (VideoMobject converts); check `data["videos"]`; autoplay needs the clip muted (it is) |
+| Video does not play | use `embed="frames"` (default; works everywhere). `embed="webm"` fails in viewers without VP9, e.g. VS Code |
 | Need the recorded data | `from manim_web_bridge import read_html; data = read_html('out.html')` |
 
 ## Rules for changes
