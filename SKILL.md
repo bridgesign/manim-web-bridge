@@ -40,7 +40,8 @@ Open the PNGs and actually look. Compare with what manim would render
 | Morph looks wrong | `align_points` in `_record_tracks`; `lerpLook()` in `player.js` |
 | Timing off with lag / LaggedStart | `_plan()` windows vs manim `get_sub_alpha` / `anims_with_timings` |
 | Huge file | `frames` commands; inspect `data["steps"][i]["cmds"]` ops |
-| Page blank | browser console via `tests/snapshot.py`; JSON must not contain raw `</` (export escapes it) |
+| Page blank | browser console via `tests/snapshot.py`; old browsers lack `DecompressionStream` -> export with `write_html(..., compress=False)` |
+| Need the recorded data | `from manim_web_bridge import read_html; data = read_html('out.html')` |
 
 ## Rules for changes
 - Port manim's own code (camera, rate functions, animations); do not invent semantics.

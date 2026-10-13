@@ -13,7 +13,15 @@
 //   prev: ArrowLeft, PageUp, Backspace                (jumps to the previous step's end)
 //   Home / End, F = fullscreen. The URL hash (#12) shows step 12 directly.
 
-const DATA = JSON.parse(document.getElementById("bridge-data").textContent);
+// The data is gzip + base64 by default (see export.py); plain JSON also works.
+async function loadData() {
+  const el = document.getElementById("bridge-data");
+  if (el.type === "application/json") return JSON.parse(el.textContent);
+  const bytes = Uint8Array.from(atob(el.textContent.trim()), (c) => c.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return JSON.parse(await new Response(stream).text());
+}
+const DATA = await loadData();
 const [FW, FH] = DATA.frame;
 const LINE_WIDTH_MULTIPLE = 0.01;          // manim Camera.cairo_line_width_multiple
 

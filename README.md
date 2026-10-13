@@ -63,14 +63,17 @@ your Scene (Python)  ──record──▶  data (JSON)  ──embed──▶  o
      two animations on the same leaf.
    Per-leaf timing for `lag_ratio`, `LaggedStart`, `AnimationGroup` follows
    manim's `get_sub_alpha` / `anims_with_timings` exactly.
-2. **Export** (`export.py`). Data (JSON) + `player.js` inlined into one HTML page.
+2. **Export** (`export.py`). Data + `player.js` inlined into one HTML page. The data is
+   gzipped and base64-encoded (~6x smaller; the browser inflates it with its built-in
+   `DecompressionStream`). `write_html(..., compress=False)` writes plain JSON;
+   `read_html(path)` returns the data from either form.
 3. **Play** (`player.js`). Drawing is a port of manim's Cairo camera
    (`Camera.set_cairo_context_path` + `display_vectorized`): 4 control points per
    cubic, new subpath where a curve doesn't start at the previous end, nonzero
    fill rule, fill then stroke, stroke width × 0.01 frame units, miter joins.
    Canvas 2D and Cairo share this model, so pictures match manim's.
 
-### Data format (`recorder.Recorder.data()`)
+### Data format (`recorder.Recorder.data()`, or `read_html(path)` on an exported page)
 
 ```jsonc
 {
@@ -124,7 +127,9 @@ Delete screenshot folders afterwards.
   cameras (`MovingCameraScene`), gradients (only the first color is used),
   background strokes, `DashedVMobject` dash patterns via shaders — not supported
   or approximated.
-- Text and LaTeX become outlines (not selectable in the page).
+- Text and LaTeX become outlines (not selectable in the page). Each glyph size is its own
+  outline, so text-heavy decks are a few MB even compressed.
+- Images (`ImageMobject`) are embedded as PNG; everything else is vector, drawn on the canvas.
 - `frames` fallback stores every changed leaf per frame: long updater-driven
   animations of many shapes make big files. Prefer tweens where you can.
 - Python-side `wait()` without updaters is just a pause; with updaters it is sampled.
