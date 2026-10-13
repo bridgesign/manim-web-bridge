@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manim-web-bridge"
+version = "0.2.0"
+description = "Record manim (Community Edition) scenes in Python and replay them in the browser: one offline HTML file, no video, no JS dependencies."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = ["manim>=0.19,<0.20"]   # numpy and pillow come with manim
+keywords = ["manim", "animation", "slides", "html", "canvas"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Multimedia :: Graphics :: Presentation",
+]
+
+[project.optional-dependencies]
+test = ["playwright"]
+
+[project.scripts]
+manim-web-bridge = "manim_web_bridge.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/bridgesign/manim-web-bridge"
+
+[tool.setuptools]
+packages = ["manim_web_bridge"]
+
+[tool.setuptools.package-data]
+manim_web_bridge = ["player.js"]
