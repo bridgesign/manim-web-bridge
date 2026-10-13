@@ -43,6 +43,14 @@ window.addEventListener("resize", resize);
 // Shapes: a "look" is {pts: Float64Array of x,y,..., f, fo, c, co, w} or an image
 // ---------------------------------------------------------------------------
 const images = DATA.images.map((src) => { const im = new Image(); im.onload = () => draw(); im.src = src; return im; });
+// Videos (VideoMobject): muted so the browser lets them autoplay.
+const videos = (DATA.videos || []).map((entry) => {
+  const { src, loop } = typeof entry === "string" ? { src: entry, loop: false } : entry;
+  const v = document.createElement("video");
+  Object.assign(v, { src, loop, muted: true, playsInline: true, preload: "auto" });
+  v.addEventListener("loadeddata", () => draw());
+  return v;
+});
 
 const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 const css = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -50,7 +58,7 @@ const same = (p, i, j) => Math.abs(p[i] - p[j]) < 1e-6 && Math.abs(p[i + 1] - p[
 
 function lookOf(s) {
   const st = DATA.states[s];
-  if (st.img !== undefined) return { ...st };
+  if (st.img !== undefined || st.vid !== undefined) return { ...st };
   const g = DATA.geoms[st.g], pts = new Float64Array(g.length);
   for (let i = 0; i < g.length; i += 2) { pts[i] = g[i] / 1000 + st.x; pts[i + 1] = g[i + 1] / 1000 + st.y; }
   return { pts, f: rgb(st.f), fo: st.fo, c: rgb(st.c), co: st.co, w: st.w };
@@ -71,9 +79,10 @@ function tracePath(p) {
 }
 
 function paint(look) {
-  if (look.img !== undefined) {
-    const im = images[look.img];
-    if (!im.complete || look.o <= 0) return;
+  if (look.img !== undefined || look.vid !== undefined) {
+    const im = look.img !== undefined ? images[look.img] : videos[look.vid];
+    const ready = look.img !== undefined ? im.complete : im.readyState >= 2;
+    if (!ready || look.o <= 0) return;
     ctx.save();
     ctx.globalAlpha = look.o;
     ctx.translate(look.x, look.y);
@@ -106,7 +115,28 @@ function draw() {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(s, 0, 0, -s, canvas.width / 2, canvas.height / 2);   // manim frame -> pixels
   ctx.lineJoin = "miter"; ctx.lineCap = "butt"; ctx.miterLimit = 10;   // Cairo defaults
-  for (const u of order) { const l = looks.get(u); if (l) paint(l); }
+  const visibleVideos = new Set();
+  for (const u of order) {
+    const l = looks.get(u);
+    if (!l) continue;
+    paint(l);
+    if (l.vid !== undefined && l.o > 0) visibleVideos.add(l.vid);
+  }
+  syncVideos(visibleVideos);
+}
+
+// A video starts from the beginning when it comes on screen, pauses when it
+// leaves, and keeps the canvas redrawing while it plays.
+let liveVideos = new Set(), videoLoop = false;
+function syncVideos(visible) {
+  for (const i of visible) if (!liveVideos.has(i)) { videos[i].currentTime = 0; videos[i].play().catch(() => {}); }
+  for (const i of liveVideos) if (!visible.has(i)) videos[i].pause();
+  liveVideos = visible;
+  if (liveVideos.size && !videoLoop) {
+    videoLoop = true;
+    const tick = () => { if (!liveVideos.size) { videoLoop = false; return; } draw(); requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  }
 }
 
 function setLook(u, s) {
@@ -126,7 +156,7 @@ function setDisplay(list) {
 const lerp = (a, b, t) => a + (b - a) * t;
 
 function lerpLook(A, B, t) {                         // Mobject.interpolate: points + style
-  if (A.img !== undefined) {
+  if (A.img !== undefined || A.vid !== undefined) {
     return { ...B, x: lerp(A.x, B.x, t), y: lerp(A.y, B.y, t), iw: lerp(A.iw, B.iw, t), ih: lerp(A.ih, B.ih, t), o: lerp(A.o, B.o, t) };
   }
   const n = Math.min(A.pts.length, B.pts.length), pts = new Float64Array(n);

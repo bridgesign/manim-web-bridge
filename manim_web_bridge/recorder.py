@@ -295,5 +295,6 @@ class Recorder:
             "geoms": self.geoms,
             "states": self.states,
             "images": self.images.urls,
+            "videos": self.images.videos,
             "steps": self.steps,
         }

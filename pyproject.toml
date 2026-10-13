@@ -19,6 +19,7 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["playwright"]
+video = ["imageio-ffmpeg"]   # ffmpeg for VideoMobject conversions, if not on PATH
 
 [project.scripts]
 manim-web-bridge = "manim_web_bridge.__main__:main"

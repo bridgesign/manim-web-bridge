@@ -14,6 +14,8 @@ camera does (Camera.set_cairo_context_path), so no conversion can drift.
              "c": "#rrggbb", "co": 1.0,    # stroke color / opacity
              "w": 4.0}                     # stroke width (manim units)
     image   {"img": i, "x": cx, "y": cy, "iw": width, "ih": height, "o": opacity}
+    video   {"vid": i, "x": cx, "y": cy, "iw": width, "ih": height, "o": opacity}
+            (videos: [{"src": WebM data URL, "loop": bool}], see media.py)
 
 The recorder then moves "p" into a shared outline bank (see recorder.py).
 """
@@ -21,6 +23,7 @@ The recorder then moves "p" into a shared outline bank (see recorder.py).
 import base64
 import hashlib
 import io
+from pathlib import Path
 
 import numpy as np
 from manim import VMobject
@@ -52,10 +55,22 @@ def vector_state(m: VMobject) -> dict:
 
 
 class ImageBank:
-    """Images are stored once (as PNG data URLs) and referenced by index."""
+    """Images are stored once (as PNG data URLs) and referenced by index;
+    videos likewise (as MP4 data URLs, in .videos)."""
 
     def __init__(self):
         self.urls, self._index = [], {}
+        self.videos, self._video_index = [], {}
+
+    def add_video(self, path: str, loop: bool = False) -> int:
+        """Videos are always WebM (VideoMobject converts anything else)."""
+        key = (path, loop)
+        if key not in self._video_index:
+            data = Path(path).read_bytes()
+            self._video_index[key] = len(self.videos)
+            self.videos.append({"src": "data:video/webm;base64," + base64.b64encode(data).decode(),
+                                "loop": bool(loop)})
+        return self._video_index[key]
 
     def add(self, pixels: np.ndarray) -> int:
         key = hashlib.sha1(pixels.tobytes()).hexdigest()
@@ -84,7 +99,19 @@ def image_state(m: AbstractImageMobject, images: ImageBank) -> dict:
     }
 
 
+def video_state(m, images: ImageBank) -> dict:
+    cx, cy, _ = m.get_center()
+    return {
+        "vid": images.add_video(m.video_path, getattr(m, "video_loop", False)),
+        "x": round(float(cx), DECIMALS), "y": round(float(cy), DECIMALS),
+        "iw": round(float(m.width), DECIMALS), "ih": round(float(m.height), DECIMALS),
+        "o": round(float(m.get_fill_opacity()), 3),
+    }
+
+
 def state_of(m, images: ImageBank) -> dict:
+    if hasattr(m, "video_path"):
+        return video_state(m, images)
     if isinstance(m, AbstractImageMobject):
         return image_state(m, images)
     return vector_state(m)
