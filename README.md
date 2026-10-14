@@ -150,11 +150,33 @@ the canvas. Keep source clips as animated WebP/GIF: unlike WebM/MP4 they also
 open directly in VS Code. Conversions are cached in
 `~/.cache/manim-web-bridge/video/`.
 
+## Layout helper (`repel`, `connected`)
+
+Overlap removal, plain manim geometry (works natively and exported):
+
+```python
+from manim_web_bridge import repel, connected, overlaps
+repel(labels, obstacles=[diagram], padding=0.08, bounds=(-6.5, 6.5, -3.2, 3.2))  # moves in place
+shifts = repel(labels, obstacles=[diagram], apply=False)                           # or animate them
+self.play(*[m.animate.shift(v) for m, v in zip(labels, shifts)])
+repel(connected(parts))      # things whose hitboxes touch move together as one rigid body
+assert overlaps(labels, [diagram]) == []
+```
+
+Hitboxes are the bounding boxes of each body's drawn leaves (or one box,
+`hitbox="box"`). Pairs are resolved one at a time along the axis of least
+overlap (sideways when the bounds block that axis); a body on an obstacle
+takes the shortest exit clear of all obstacles; a cooling spring pulls
+bodies back toward where they were placed. Inspired by d3-force
+(`forceCollide`, `forceX/Y`, alpha decay) and label-placement libraries
+such as labella.js; no code taken from them.
+
 ## Files
 
 | File | What |
 | --- | --- |
 | `manim_web_bridge/scene.py` | `BridgeScene` — subclass this instead of `Scene` |
+| `manim_web_bridge/layout.py` | `repel` / `connected` / `overlaps`: hitbox-based overlap removal |
 | `manim_web_bridge/recorder.py` | records `play`/`wait`/`next_slide` into steps |
 | `manim_web_bridge/geometry.py` | mobject → state (points, style, images) |
 | `manim_web_bridge/export.py` | writes the HTML page |
@@ -165,6 +187,8 @@ open directly in VS Code. Conversions are cached in
 | `tests/snapshot.py` | headless Chromium check: screenshots + console errors |
 
 ## Testing (do this after every change)
+
+`python tests/test_layout.py` checks the layout helper (no browser needed).
 
 ```bash
 python -m manim_web_bridge examples/demo.py Demo /tmp/demo.html
