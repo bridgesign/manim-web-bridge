@@ -233,8 +233,10 @@ class VideoMobject(ImageMobject):
         source = Path(source)
         self.video_loop = loop
         if embed == "webp":
+            # an animated image is embedded as-is unless it must change; a clip that
+            # should play once (loop=False) is re-encoded, as GIFs usually loop forever
             untouched = (source.suffix.lower() in (".webp", ".gif") and not (crop or trim or speed != 1.0)
-                         and (height is None or _image_meta(source)["h"] <= height))
+                         and loop and (height is None or _image_meta(source)["h"] <= height))
             if untouched:                                    # already an animated image: embed as-is
                 path, meta = source.resolve(), _image_meta(source)
             else:

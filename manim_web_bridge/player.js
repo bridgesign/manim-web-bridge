@@ -34,7 +34,16 @@ const N_STEPS = DATA.steps.length;
 
 // Chunk k (folder form) calls __bridgeChunk(k, {step, states, geoms}).
 const chunkWaiters = new Map(), chunkLoads = new Map();
+// A rebuild while the page is open replaces main.html and every step file;
+// a step from another build (or a missing one) means the page is stale, so
+// reload it once, at the same step (the URL hash), instead of mixing builds.
+function reloadStale() {
+  const key = "bridge-reloaded-" + DATA.build;
+  try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, "1"); } catch (e) {}
+  location.reload();
+}
 window.__bridgeChunk = (k, c) => {
+  if (DATA.build && c.build && c.build !== DATA.build) { reloadStale(); return; }
   for (const i in c.states) DATA.states[i] = c.states[i];
   for (const i in c.geoms) DATA.geoms[i] = c.geoms[i];
   DATA.steps[k] = c.step;
@@ -46,8 +55,8 @@ function loadChunk(k) {
     chunkLoads.set(k, new Promise((resolve, reject) => {
       chunkWaiters.set(k, resolve);
       const s = document.createElement("script");      // <script>, not fetch(): works from file://
-      s.src = `steps/step_${String(k).padStart(3, "0")}.js`;
-      s.onerror = () => reject(new Error("cannot load " + s.src));
+      s.src = `steps/step_${String(k).padStart(3, "0")}.js` + (DATA.build ? `?b=${DATA.build}` : "");
+      s.onerror = () => { reloadStale(); reject(new Error("cannot load " + s.src)); };
       document.head.appendChild(s);
     }));
   }
@@ -303,9 +312,10 @@ let cancel = false;                                  // set when the user skips 
 const now = () => performance.now() / 1000;
 const frame = () => new Promise((r) => requestAnimationFrame(r));
 
-async function play(cmd) {
+// Each command gets its scheduled start time t0 (the step clock, see runStep):
+// one that starts late catches up instead of pushing every later one back.
+async function play(cmd, t0 = now()) {
   const tracks = cmd.tr.map((tr) => ({ tr, A: lookOf(tr.a), B: lookOf(tr.b) }));
-  const t0 = now();
   for (;;) {
     const t = cancel ? Infinity : now() - t0;
     for (const { tr, A, B } of tracks) {
@@ -319,8 +329,7 @@ async function play(cmd) {
   }
 }
 
-async function frames(cmd) {
-  const t0 = now();
+async function frames(cmd, t0 = now()) {
   let shown = -1;
   for (;;) {
     const i = cancel ? cmd.f.length - 1 : Math.min(cmd.f.length - 1, Math.floor((now() - t0) * cmd.fps));
@@ -339,8 +348,7 @@ async function frames(cmd) {
   }
 }
 
-async function wait(cmd) {
-  const t0 = now();
+async function wait(cmd, t0 = now()) {
   while (!cancel && now() - t0 < cmd.d) await frame();
 }
 
@@ -406,6 +414,7 @@ let current = -1, running = null;
 
 async function jump(i) {
   const k = Math.max(0, Math.min(N_STEPS - 1, i));
+  history.replaceState(null, "", "#" + k);           // first, so a stale-page reload lands here
   await ensureStep(k);
   current = k;
   setDisplay(DATA.steps[current].end);
@@ -415,6 +424,7 @@ async function jump(i) {
 }
 
 async function runStep(i, once = false) {
+  history.replaceState(null, "", "#" + i);           // first, so a stale-page reload lands here
   await ensureStep(i);
   preload(i + 1);                                    // background, while this step plays
   current = i;
@@ -422,11 +432,16 @@ async function runStep(i, once = false) {
   cancel = false;
   const step = DATA.steps[i];
   do {                                               // a loop step repeats until a click
+    // step clock: command k starts at (pass start + durations of 0..k-1), so the
+    // frame-rounding of each command never adds up (clips stay in sync over a pass)
+    let due = now();
     for (const cmd of step.cmds) {
-      if (cmd.op === "set") { setDisplay(cmd.d); draw(); }
-      else if (cmd.op === "play") await play(cmd);
-      else if (cmd.op === "frames") await frames(cmd);
-      else if (cmd.op === "wait") await wait(cmd);
+      if (cmd.op === "set") { setDisplay(cmd.d); draw(); continue; }
+      if (cmd.op === "play") await play(cmd, due);
+      else if (cmd.op === "frames") await frames(cmd, due);
+      else if (cmd.op === "wait") await wait(cmd, due);
+      due += cmd.op === "play" ? cmd.T : cmd.op === "wait" ? cmd.d : cmd.f.length / cmd.fps;
+      if (now() - due > 0.25) due = now();           // far behind (tab was hidden): restart the clock
     }
     if (step.loop) await frame();                    // never spin without yielding
   } while (step.loop && !cancel && !once);

@@ -24,6 +24,7 @@ import gzip
 import json
 import re
 import shutil
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -135,14 +136,15 @@ def write_site(data: dict, folder, title: str = "Slides") -> Path:
     for k, r in enumerate(refs):
         need = {k} | {s_owner[s] for s in r} | {g_owner[states[s]["g"]] for s in r if "g" in states[s]}
         deps.append(sorted(need))
+    build = uuid.uuid4().hex[:12]                # ties the steps to this main.html (see player.js)
     for k, step in enumerate(steps):
-        chunk = {"step": step,
+        chunk = {"build": build, "step": step,
                  "states": {s: states[s] for s in range(len(states)) if s_owner[s] == k},
                  "geoms": {g: geoms[g] for g, o in g_owner.items() if o == k}}
         (folder / "steps" / f"step_{k:03d}.js").write_text(
             f"__bridgeChunk({k},{json.dumps(chunk, separators=(',', ':'))});\n")
 
-    head = {"version": 2, "frame": data["frame"], "background": data["background"],
+    head = {"version": 2, "build": build, "frame": data["frame"], "background": data["background"],
             "images": images, "videos": videos, "deps": deps}
     w, h = data["frame"]
     index = folder / "main.html"
