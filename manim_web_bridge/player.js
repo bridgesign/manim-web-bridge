@@ -345,6 +345,61 @@ async function wait(cmd) {
 }
 
 // ---------------------------------------------------------------------------
+// Preloading: while a step plays, the next one is fetched in the background
+// ---------------------------------------------------------------------------
+// preload(k) loads step k's chunks, then fetches and decodes every image and
+// clip it shows, so nothing pops in late when the click comes. It runs when
+// the browser is idle and never blocks playback; an "auto" step pulls in the
+// step it flows into as well.
+const preloaded = new Set(), heldClips = [];
+const idle = () => new Promise((r) => (window.requestIdleCallback ? requestIdleCallback(() => r(), { timeout: 500 })
+                                                                 : setTimeout(r, 50)));
+
+function statesOf(step) {
+  const ids = new Set(step.end.map(([, s]) => s));
+  for (const cmd of step.cmds) {
+    if (cmd.op === "set") cmd.d.forEach(([, s]) => ids.add(s));
+    else if (cmd.op === "play") cmd.tr.forEach((tr) => { ids.add(tr.a); ids.add(tr.b); });
+    else if (cmd.op === "frames") cmd.f.forEach((f) => f.u.forEach(([, s]) => ids.add(s)));
+  }
+  return ids;
+}
+
+async function warmMedia(step) {
+  const jobs = [];
+  for (const s of statesOf(step)) {
+    const st = DATA.states[s];
+    if (!st) continue;
+    if (st.img !== undefined) jobs.push(imageEl(st.img).decode?.().catch(() => {}));
+    else if (st.vid !== undefined) {
+      const entry = DATA.videos[st.vid];
+      if (entry.anim !== undefined && !heldClips[st.vid]) {
+        const im = new Image();                         // same URL as the overlay <img> -> cached
+        im.src = entry.anim;
+        heldClips[st.vid] = im;                         // keep it alive so the cache entry stays
+        jobs.push(im.decode?.().catch(() => {}));
+      } else if (entry.anim === undefined) videoEl(st.vid);   // <video preload="auto">
+    }
+  }
+  await Promise.all(jobs);
+}
+
+async function preload(k) {
+  for (; k < N_STEPS && !preloaded.has(k); k++) {
+    preloaded.add(k);
+    await idle();
+    try {
+      await ensureStep(k);
+      await warmMedia(DATA.steps[k]);
+    } catch (e) {
+      preloaded.delete(k);                              // try again on the next chance
+      return;
+    }
+    if (!DATA.steps[k].auto) return;                    // an "auto" step: its follower too
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Steps and navigation
 // ---------------------------------------------------------------------------
 let current = -1, running = null;
@@ -356,10 +411,12 @@ async function jump(i) {
   setDisplay(DATA.steps[current].end);
   draw();
   history.replaceState(null, "", "#" + current);
+  preload(current + 1);
 }
 
 async function runStep(i, once = false) {
   await ensureStep(i);
+  preload(i + 1);                                    // background, while this step plays
   current = i;
   history.replaceState(null, "", "#" + i);
   cancel = false;
@@ -374,7 +431,6 @@ async function runStep(i, once = false) {
     if (step.loop) await frame();                    // never spin without yielding
   } while (step.loop && !cancel && !once);
   await jump(i);                                     // land exactly on the recorded end state
-  if (i + 1 < N_STEPS) ensureStep(i + 1).catch(() => {});   // prefetch while the speaker talks
   window.__bridgeIdle = true;
 }
 
@@ -416,7 +472,7 @@ document.addEventListener("keydown", (e) => {
 canvas.addEventListener("click", next);
 
 // for tests / automation
-window.bridge = { next, prev, jump, run: (i) => runStep(i, true), steps: N_STEPS, get current() { return current; },
+window.bridge = { next, prev, jump, preload, run: (i) => runStep(i, true), steps: N_STEPS, get current() { return current; },
                   get _videos() { return videoCache; }, get _overlays() { return [...overlayEls.values()]; } };
 
 resize();
