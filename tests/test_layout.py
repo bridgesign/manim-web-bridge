@@ -1,42 +1,40 @@
-"""Checks for layout.repel / connected. Run: python tests/test_layout.py"""
+"""Checks for layout.free_range / place / overlaps. Run: python tests/test_layout.py"""
 import numpy as np
-from manim import Circle, Dot, Rectangle, Square, VGroup
+from manim import Rectangle, Square
 
-from manim_web_bridge import connected, overlaps, repel
+from manim_web_bridge import free_range, overlaps, place
 
-
-def test_repel_removes_overlaps():
-    rng = np.random.default_rng(0)
-    labels = [Rectangle(width=1.2, height=0.4).move_to([*rng.uniform(-1, 1, 2), 0]) for _ in range(12)]
-    wall = Square(1.0).move_to([0, 0, 0])
-    starts = [m.get_center().copy() for m in labels]
-    assert overlaps(labels, [wall])
-    repel(labels, [wall], padding=0.05)
-    assert overlaps(labels, [wall]) == [], overlaps(labels, [wall])
-    assert np.allclose(wall.get_center(), 0)                          # obstacles never move
-    moved = max(np.linalg.norm(m.get_center() - s) for m, s in zip(labels, starts))
-    assert moved < 3.0, moved                                         # stays near the hand layout
+BOUNDS = (-6.0, 6.0, -3.0, 3.0)
 
 
-def test_apply_false_and_bounds():
-    a, b = Square(1).move_to([0, 0, 0]), Square(1).move_to([0.2, 0, 0])
-    shifts = repel([a, b], apply=False, bounds=(-3, 3, -2, 2))
-    assert np.allclose(a.get_center(), [0, 0, 0])                     # nothing moved
-    a.shift(shifts[0]), b.shift(shifts[1])
-    assert overlaps([a, b]) == []
+def test_free_range_between_obstacles():
+    header = Rectangle(width=10, height=0.5).move_to([0, 2.5, 0])
+    footer = Rectangle(width=10, height=0.5).move_to([0, -2.5, 0])
+    box = Square(1.0).move_to([0, -2.2, 0])                       # overlaps the footer
+    lo, hi = free_range(box, [header, footer], axis="y", bounds=BOUNDS, padding=0.1)
+    # centre must keep the box 0.1 clear of both bars: (-2.25 + 0.1 + 0.5, 2.25 - 0.1 - 0.5)
+    assert np.allclose([lo, hi], [-1.65, 1.65]), (lo, hi)
+    place(box, [header, footer], axis="y", bounds=BOUNDS, padding=0.1)            # default: the middle
+    assert np.isclose(box.get_y(), 0.0) and overlaps([box], [header, footer], 0.1) == []
+    place(box, [header, footer], axis="y", bounds=BOUNDS, padding=0.1, at=0.0)    # or pinned to the bottom
+    assert np.isclose(box.get_y(), -1.65)
 
 
-def test_leaf_hitboxes_and_components():
-    # an L-shaped group: a box around it would hit the dot, its leaves do not
-    ell = VGroup(Rectangle(width=2, height=0.2).move_to([0, -0.9, 0]),
-                 Rectangle(width=0.2, height=2).move_to([-0.9, 0, 0]))
-    dot = Dot([0.4, 0.3, 0])
-    assert overlaps([ell, dot]) == [] and overlaps([ell, dot], hitbox="box")
-    # touching pairs become rigid components
-    node, label = Circle(0.3).move_to([0, 0, 0]), Rectangle(width=0.8, height=0.3).move_to([0.5, 0, 0])
-    other = Circle(0.3).move_to([3, 0, 0])
-    comps = connected([node, label, other])
-    assert sorted(len(c.submobjects) for c in comps) == [1, 2]
+def test_obstacles_beside_do_not_block():
+    wall = Rectangle(width=1, height=6).move_to([3, 0, 0])        # not in the box's x-extent
+    box = Square(1.0).move_to([0, 0, 0])
+    assert np.allclose(free_range(box, [wall], axis="y", bounds=BOUNDS, padding=0.1), [-2.5, 2.5])
+    lo, hi = free_range(box, [wall], axis="x", bounds=BOUNDS, padding=0.1)        # along x it is
+    assert np.isclose(lo, -5.5) and np.isclose(hi, 2.5 - 0.1 - 0.5)
+
+
+def test_nearest_free_interval_and_no_room():
+    middle = Rectangle(width=4, height=1).move_to([0, 0, 0])
+    box = Square(1.0).move_to([0, 0.2, 0])                         # inside the obstacle, closer to the top gap
+    lo, hi = free_range(box, [middle], axis="y", bounds=BOUNDS, padding=0.0)
+    assert np.isclose(lo, 1.0) and np.isclose(hi, 2.5)
+    big = Square(7.0)
+    assert free_range(big, axis="y", bounds=BOUNDS) is None        # taller than the bounds
 
 
 if __name__ == "__main__":

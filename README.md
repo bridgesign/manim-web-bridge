@@ -150,33 +150,28 @@ the canvas. Keep source clips as animated WebP/GIF: unlike WebM/MP4 they also
 open directly in VS Code. Conversions are cached in
 `~/.cache/manim-web-bridge/video/`.
 
-## Layout helper (`repel`, `connected`)
+## Layout helper (`free_range`, `place`)
 
-Overlap removal, plain manim geometry (works natively and exported):
+Where can a mobject go without touching others? Every mobject is one big
+bounding box. `free_range` slides it along one axis and returns the
+(min, max) of centre positions that keep it inside `bounds` and clear of the
+obstacles by `padding` (the free interval around it, or the nearest one).
+It only gives bounds; positioning stays yours, and `place` defaults to the
+middle of the range. Plain manim geometry (works natively and exported).
 
 ```python
-from manim_web_bridge import repel, connected, overlaps
-repel(labels, obstacles=[diagram], padding=0.08, bounds=(-6.5, 6.5, -3.2, 3.2))  # moves in place
-shifts = repel(labels, obstacles=[diagram], apply=False)                           # or animate them
-self.play(*[m.animate.shift(v) for m, v in zip(labels, shifts)])
-repel(connected(parts))      # things whose hitboxes touch move together as one rigid body
-assert overlaps(labels, [diagram]) == []
+from manim_web_bridge import free_range, place, overlaps
+lo, hi = free_range(diagram, [header, notes], axis="y", bounds=(-6.5, 6.5, -3.1, 2.8), padding=0.15)
+place(diagram, [header, notes], axis="y", bounds=(-6.5, 6.5, -3.1, 2.8), at=0.5)   # middle (default)
+assert overlaps([diagram], [header, notes], padding=0.15) == []
 ```
-
-Hitboxes are the bounding boxes of each body's drawn leaves (or one box,
-`hitbox="box"`). Pairs are resolved one at a time along the axis of least
-overlap (sideways when the bounds block that axis); a body on an obstacle
-takes the shortest exit clear of all obstacles; a cooling spring pulls
-bodies back toward where they were placed. Inspired by d3-force
-(`forceCollide`, `forceX/Y`, alpha decay) and label-placement libraries
-such as labella.js; no code taken from them.
 
 ## Files
 
 | File | What |
 | --- | --- |
 | `manim_web_bridge/scene.py` | `BridgeScene` — subclass this instead of `Scene` |
-| `manim_web_bridge/layout.py` | `repel` / `connected` / `overlaps`: hitbox-based overlap removal |
+| `manim_web_bridge/layout.py` | `free_range` / `place` / `overlaps`: free space along an axis (bounding boxes) |
 | `manim_web_bridge/recorder.py` | records `play`/`wait`/`next_slide` into steps |
 | `manim_web_bridge/geometry.py` | mobject → state (points, style, images) |
 | `manim_web_bridge/export.py` | writes the HTML page |
