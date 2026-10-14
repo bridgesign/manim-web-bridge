@@ -48,7 +48,7 @@ running step), ← / PageUp = previous, Home / End, `f` = fullscreen.
 | --- | --- |
 | Python | `manim>=0.19,<0.20` only (numpy, pillow come with it). LaTeX only if the scene uses `Tex`/`MathTex`, as in plain manim. |
 | Browser | nothing — `player.js` is plain JavaScript on a `<canvas>` |
-| Video (optional) | nothing for `VideoMobject(embed="frames")`; ffmpeg (PATH or `pip install manim-web-bridge[video]`) only for `embed="webm"` |
+| Video (optional) | nothing for `VideoMobject(embed="webp")` (default); ffmpeg (PATH or `pip install manim-web-bridge[video]`) only for `embed="webm"` |
 | Tests (optional) | `playwright` + Chromium (`python -m playwright install chromium`) |
 
 Keep it that way: **do not add dependencies** without a strong reason.
