@@ -358,34 +358,51 @@ async function jump(i) {
   history.replaceState(null, "", "#" + current);
 }
 
-async function runStep(i) {
+async function runStep(i, once = false) {
   await ensureStep(i);
   current = i;
   history.replaceState(null, "", "#" + i);
   cancel = false;
-  for (const cmd of DATA.steps[i].cmds) {
-    if (cmd.op === "set") { setDisplay(cmd.d); draw(); }
-    else if (cmd.op === "play") await play(cmd);
-    else if (cmd.op === "frames") await frames(cmd);
-    else if (cmd.op === "wait") await wait(cmd);
-  }
+  const step = DATA.steps[i];
+  do {                                               // a loop step repeats until a click
+    for (const cmd of step.cmds) {
+      if (cmd.op === "set") { setDisplay(cmd.d); draw(); }
+      else if (cmd.op === "play") await play(cmd);
+      else if (cmd.op === "frames") await frames(cmd);
+      else if (cmd.op === "wait") await wait(cmd);
+    }
+    if (step.loop) await frame();                    // never spin without yielding
+  } while (step.loop && !cancel && !once);
   await jump(i);                                     // land exactly on the recorded end state
   if (i + 1 < N_STEPS) ensureStep(i + 1).catch(() => {});   // prefetch while the speaker talks
   window.__bridgeIdle = true;
 }
 
+let chain = true;                                    // false: stop following "auto" steps
+
 function start(i) {
   window.__bridgeIdle = false;
-  running = runStep(i).finally(() => { running = null; });
+  chain = true;
+  running = (async () => {
+    for (let k = i; ; k++) {
+      await runStep(k);
+      if (!DATA.steps[k].auto || !chain || k + 1 >= N_STEPS) break;   // "auto": no click needed
+      window.__bridgeIdle = false;
+    }
+  })().finally(() => { running = null; });
 }
 
 async function next() {
-  if (running) { cancel = true; await running; return; }   // first click finishes the step
+  if (running) {                                     // first click finishes the step ...
+    cancel = true;
+    if (!DATA.steps[current].loop) return;           // (an "auto" chain then carries on)
+    chain = false; await running;                    // ... a looping one moves straight on
+  }
   if (current + 1 < N_STEPS) start(current + 1);
 }
 
 async function prev() {
-  if (running) { cancel = true; await running; }
+  if (running) { chain = false; cancel = true; await running; }
   await jump(current - 1);
 }
 
@@ -399,7 +416,7 @@ document.addEventListener("keydown", (e) => {
 canvas.addEventListener("click", next);
 
 // for tests / automation
-window.bridge = { next, prev, jump, steps: N_STEPS, get current() { return current; },
+window.bridge = { next, prev, jump, run: (i) => runStep(i, true), steps: N_STEPS, get current() { return current; },
                   get _videos() { return videoCache; }, get _overlays() { return [...overlayEls.values()]; } };
 
 resize();

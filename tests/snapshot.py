@@ -50,9 +50,8 @@ async def main(page_path: Path, out: Path, width: int, only=None, film=None, eve
         await page.wait_for_function("window.bridge && window.__bridgeIdle === true", timeout=60000)
         steps = await page.evaluate("window.bridge.steps")
         for i in range(steps):
-            if i > 0:
-                await page.evaluate("window.bridge.next()")
-                await page.wait_for_function("window.__bridgeIdle === true", timeout=120000)
+            if i > 0:   # each step once, in order (loops: one pass; no "auto" chaining)
+                await page.evaluate(f"window.bridge.run({i})")
             await page.screenshot(path=str(out / f"step_{i:03d}.png"))
         await browser.close()
     print(f"{steps} steps -> {out}")

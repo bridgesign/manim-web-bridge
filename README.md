@@ -36,10 +36,21 @@ class Demo(BridgeScene):
         self.play(Create(c))
         self.next_slide()              # a click: playback stops here
         self.play(c.animate.shift(RIGHT))
+        self.next_slide(loop=True)     # the animations until the next click repeat
+        self.play(Indicate(c))
+        self.next_slide()
 ```
 
+The same scene still renders with plain manim (`manim -pql demo.py Demo`):
+outside `export()` a `BridgeScene` is an ordinary `Scene` and `next_slide()`
+does nothing.
+
+`next_slide(click=False)` ends a step without a click (the player carries
+straight on), e.g. a slide's intro running into a looping animation;
+`auto_next=True` (as in manim-slides) does the same for the step it opens.
+
 Keys in the page: → / Space / PageDown / click = next (a first press finishes a
-running step), ← / PageUp = previous, Home / End, `f` = fullscreen.
+running step; on a looping step it moves straight on), ← / PageUp = previous, Home / End, `f` = fullscreen.
 `out.html#12` opens directly at the end of step 12.
 
 ## Dependencies
@@ -99,7 +110,8 @@ your Scene (Python)  ──record──▶  data (JSON)  ──embed──▶  o
               "f": "#rrggbb", "fo": 1, "c": "#rrggbb", "co": 1, "w": 4},
              {"img": 0, "x": 0, "y": 0, "iw": 2, "ih": 1, "o": 1}],
   "images": ["data:image/png;base64,..."],
-  "steps": [{"cmds": [...], "end": [[uid, state], ...]}]   // one step per click
+  "steps": [{"cmds": [...], "end": [[uid, state], ...],    // one step per click
+             "loop": true}]                              // optional: repeat until a click
 }
 ```
 
@@ -120,7 +132,11 @@ clip = VideoMobject("replay.webp", width=7.0,       # animated WebP / GIF, or a 
 self.play(FadeIn(clip)); self.wait(clip.video_seconds)
 ```
 
-A rectangle in Python (layout, fades and moves work as for any mobject).
+An `ImageMobject` in Python showing the clip's first frame (layout, fades and
+moves work as for any image; group it with `Group`, not `VGroup`). Rendered by
+plain manim (`manim -pql ...`), it plays: an updater shows the frame for the
+time the clip has been on screen. Exported, the browser plays it instead (the
+recorder switches that updater off per clip).
 
 | `embed=` | What is embedded | Plays in | Needs |
 | --- | --- | --- | --- |
@@ -128,7 +144,7 @@ A rectangle in Python (layout, fades and moves work as for any mobject).
 | `"webm"` | VP9 WebM in a muted `<video>` drawn into the canvas | Chrome, Firefox, Edge — not VS Code | ffmpeg (PATH or `[video]` extra) |
 
 Browsers only animate images they actually show, so animated clips are real
-`<img>` elements kept over their rectangle (fades = CSS opacity; a fresh
+`<img>` elements kept over their image (fades = CSS opacity; a fresh
 element each time the clip comes on screen restarts it). They are drawn above
 the canvas. Keep source clips as animated WebP/GIF: unlike WebM/MP4 they also
 open directly in VS Code. Conversions are cached in

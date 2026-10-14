@@ -107,7 +107,7 @@ def video_state(m, images: ImageBank) -> dict:
         "vid": images.add_video(m.video_path, getattr(m, "video_loop", False), getattr(m, "video_anim", False)),
         "x": round(float(cx), DECIMALS), "y": round(float(cy), DECIMALS),
         "iw": round(float(m.width), DECIMALS), "ih": round(float(m.height), DECIMALS),
-        "o": round(float(m.get_fill_opacity()), 3),
+        "o": round(float(m.stroke_opacity), 3),      # an ImageMobject: like image_state
     }
 
 

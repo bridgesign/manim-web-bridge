@@ -69,6 +69,13 @@ def _kind(anim) -> str | None:
     return None
 
 
+def _has_updaters(scene) -> bool:
+    """Updaters that change the picture (VideoMobject's own frame updater
+    only runs in native manim rendering, so it does not count)."""
+    return any(not getattr(u, "bridge_native", False)
+               for m in scene.get_mobject_family_members() for u in m.updaters)
+
+
 class Recorder:
     def __init__(self, scene):
         self.scene = scene
@@ -80,6 +87,8 @@ class Recorder:
         self.cmds = []                            # commands of the current step
         self._uids, self._keep = {}, []           # id(mobject) -> uid
         self._shown = None                        # last display list sent
+        self._loop = False                        # current step repeats until a click
+        self._auto = False                        # current step flows into the next one
 
     # ------------------------------------------------------------------
     # bookkeeping
@@ -100,6 +109,8 @@ class Recorder:
             fp = (id(m), m.points.tobytes(), getattr(m, "stroke_opacity", 1.0))
         if fp in self._memo:
             return self._memo[fp]
+        if getattr(m, "native_playback", False):
+            m.native_playback = False   # a VideoMobject: the browser plays it, not Python
 
         state = state_of(m, self.images)
         if "p" in state:   # outline -> outline bank, keep only offset + style
@@ -136,12 +147,27 @@ class Recorder:
             self.cmds.append({"op": "set", "d": d})
             self._shown = d
 
-    def end_step(self):
+    def end_step(self, loop: bool = False, auto_next: bool = False, click: bool = True):
         """Close the current step (a click). Its end state is stored so the
-        player can jump straight to it."""
+        player can jump straight to it.
+          loop       the NEXT step repeats until the following click
+                     (manim-slides' next_slide(loop=True)); it starts with a
+                     forced 'set' so every repeat begins from the same screen
+          auto_next  the NEXT step, once done, starts the one after it
+                     without a click (manim-slides' auto_next)
+          click      False: no click here -- the step being closed flows
+                     straight into the next one"""
         self.sync()
-        self.steps.append({"cmds": self.cmds, "end": self._shown or []})
+        step = {"cmds": self.cmds, "end": self._shown or []}
+        if self._loop:
+            step["loop"] = True
+        if self._auto or not click:
+            step["auto"] = True
+        self.steps.append(step)
         self.cmds = []
+        self._loop, self._auto = loop, auto_next
+        if loop:
+            self.sync(force=True)
 
     # ------------------------------------------------------------------
     # play
@@ -165,7 +191,7 @@ class Recorder:
         run_time = max(a.run_time for a in anims)
 
         units = self._plan(anims)
-        has_updaters = any(m.updaters for m in scene.get_mobject_family_members())
+        has_updaters = _has_updaters(scene)
         if units is None or has_updaters:
             self._record_frames(anims, run_time)
         else:
@@ -274,7 +300,7 @@ class Recorder:
     def wait(self, duration: float):
         if duration <= 0:
             return
-        if any(m.updaters for m in self.scene.get_mobject_family_members()):
+        if _has_updaters(self.scene):
             from manim import Wait
             self.play(Wait(duration))
         else:

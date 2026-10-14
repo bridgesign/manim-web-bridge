@@ -14,10 +14,12 @@ VideoMobject: a video placed in the scene like an image.
     )
     self.play(FadeIn(clip))              # fades, moves and scaling work like any shape
 
-In Python it is just a filled rectangle with the clip's aspect ratio, so
-layout, fades and moves behave like any mobject. The recorder embeds the
-clip once and the player draws its current frame into that rectangle; it
-starts from the beginning when it comes on screen and pauses when it leaves.
+It is an ImageMobject (showing the clip's first frame), so layout, fades and
+moves behave like any image. Exported, the recorder embeds the clip once and
+the player shows it at the image's place; it starts from the beginning when
+it comes on screen. Rendered by manim itself, an updater swaps in the frame
+for the time the clip has been on screen, so the same scene also works as a
+plain manim video.
 
 Two ways to embed (`embed=`):
   "webp" (default)  ONE animated WebP that the browser animates itself
@@ -42,7 +44,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from manim import Rectangle
+import numpy as np
+from manim import ImageMobject
 
 CACHE_DIR = Path.home() / ".cache" / "manim-web-bridge" / "video"
 
@@ -180,7 +183,48 @@ def _image_meta(path: Path) -> dict:
         return {"w": im.width, "h": im.height, "seconds": seconds}
 
 
-class VideoMobject(Rectangle):
+class _NativeFrames:
+    """Frames of the embedded clip for native manim rendering, decoded on
+    demand (animated image: Pillow; WebM: PyAV, decoded once)."""
+
+    def __init__(self, path: Path, anim: bool):
+        self.path, self.anim = Path(path), anim
+        self.starts, self._frames, self._im, self._last = [], None, None, None
+        if anim:
+            from PIL import Image
+            self._im = Image.open(self.path)
+            t = 0.0
+            for k in range(getattr(self._im, "n_frames", 1)):
+                self._im.seek(k)
+                self.starts.append(t)
+                t += (self._im.info.get("duration") or 100) / 1000
+            self.seconds = t
+        else:
+            self._frames = [img for _, img in _source_frames(self.path) if img is not None]
+            fps = len(self._frames) / max(1e-6, probe(self.path)["seconds"])
+            self.starts = [k / fps for k in range(len(self._frames))]
+            self.seconds = len(self._frames) / fps
+
+    def __deepcopy__(self, memo):   # mobject copies (FadeIn, .animate, ...) share the decoder
+        return self
+
+    def index_at(self, t: float, loop: bool) -> int:
+        t = t % self.seconds if loop and self.seconds > 0 else min(t, self.seconds)
+        return max(0, int(np.searchsorted(self.starts, t, side="right")) - 1)
+
+    def rgba(self, k: int) -> np.ndarray:
+        """Frame k as a fresh RGBA array (the last one is cached)."""
+        if self._last is None or self._last[0] != k:
+            if self._im is not None:
+                self._im.seek(k)
+                img = self._im
+            else:
+                img = self._frames[k]
+            self._last = (k, np.array(img.convert("RGBA")))
+        return self._last[1].copy()
+
+
+class VideoMobject(ImageMobject):
     """A video clip on the slide; see the module docstring for the options."""
 
     def __init__(self, source, width: float = 8.0, *, crop=None, trim=None, height: int = 720,
@@ -211,7 +255,25 @@ class VideoMobject(Rectangle):
             raise ValueError(f"embed must be 'webp' or 'webm', not {embed!r}")
         self.video_path = str(path)
         self.video_seconds = meta["seconds"]          # handy for deck.wait(...)
-        kwargs.setdefault("stroke_width", 0)
-        kwargs.setdefault("fill_color", "#000000")
-        kwargs.setdefault("fill_opacity", 1.0)        # carries the clip's opacity
-        super().__init__(width=width, height=width * meta["h"] / meta["w"], **kwargs)
+
+        self._native = _NativeFrames(path, self.video_anim)
+        super().__init__(self._native.rgba(0), **kwargs)
+        self.scale_to_fit_width(width)
+        self._clock = 0.0
+        self.native_playback = True   # the recorder turns this off: the browser plays the clip
+
+        def advance(m, dt):           # native manim only: show the frame for the time on screen
+            if not m.native_playback or dt <= 0:
+                return
+            m._clock += dt          # (re-set every tick: a running fade rewrites the pixels)
+            m.set_frame(m._native.index_at(m._clock, m.video_loop))
+        advance.bridge_native = True  # the recorder ignores this updater
+        self.add_updater(advance)
+
+    def set_frame(self, k: int):
+        """Show frame k (keeps the current opacity)."""
+        rgba = self._native.rgba(k)
+        self.orig_alpha_pixel_array = rgba[:, :, 3].copy()
+        rgba[:, :, 3] = (rgba[:, :, 3] * float(self.stroke_opacity)).astype(np.uint8)
+        self.pixel_array = rgba
+        return self

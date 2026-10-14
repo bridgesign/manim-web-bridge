@@ -16,7 +16,11 @@ description: Turn a manim (Community Edition) scene or slide deck into one self-
 
 ## Build a page
 1. Subclass `BridgeScene` instead of `Scene` (`from manim_web_bridge import BridgeScene`).
-   Use `self.next_slide()` where the viewer should click. Everything else is plain manim.
+   Use `self.next_slide()` where the viewer should click; `self.next_slide(loop=True)` makes the
+   animations up to the next `next_slide()` repeat until that click; `click=False` ends a step without
+   waiting (intro flows into a loop). Everything else is plain manim, and the same scene still renders
+   with `manim -pql` (BridgeScene is a plain Scene there; VideoMobject plays natively).
+   VideoMobject is an ImageMobject: put it in `Group`, not `VGroup`.
 2. Export: `SceneName.export("out/")` from Python, or `python -m manim_web_bridge path/to/file.py SceneName out/` (folder: open
    `out/main.html`; steps load on demand) or `... out.html` (one self-contained file).
    The file's folder is put on `sys.path`, so decks can import sibling modules.
