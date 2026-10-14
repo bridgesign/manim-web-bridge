@@ -92,7 +92,8 @@ def _step_refs(step: dict) -> set:
 def _data_url_bytes(url: str) -> tuple[bytes, str]:
     head, b64 = url.split(",", 1)
     mime = head[5:].split(";")[0]
-    ext = {"image/png": "png", "image/webp": "webp", "image/jpeg": "jpg", "video/webm": "webm"}.get(mime, "bin")
+    ext = {"image/png": "png", "image/webp": "webp", "image/jpeg": "jpg", "image/gif": "gif",
+           "video/webm": "webm"}.get(mime, "bin")
     return base64.b64decode(b64), ext
 
 
@@ -111,19 +112,11 @@ def write_site(data: dict, folder, title: str = "Slides") -> Path:
         images.append(f"media/img_{i}.{ext}")
     videos = []
     for i, v in enumerate(data.get("videos", [])):
-        if "frames" in v:
-            clip = folder / "media" / f"clip_{i}"
-            clip.mkdir()
-            urls = []
-            for j, url in enumerate(v["frames"]):
-                raw, ext = _data_url_bytes(url)
-                (clip / f"{j:05d}.{ext}").write_bytes(raw)
-                urls.append(f"media/clip_{i}/{j:05d}.{ext}")
-            videos.append({**v, "frames": urls})
-        else:
-            raw, ext = _data_url_bytes(v["src"])
-            (folder / "media" / f"clip_{i}.{ext}").write_bytes(raw)
-            videos.append({"src": f"media/clip_{i}.{ext}", "loop": v.get("loop", False)})
+        url = v.get("anim") or v.get("src")
+        raw, ext = _data_url_bytes(url)
+        (folder / "media" / f"clip_{i}.{ext}").write_bytes(raw)
+        key = "anim" if "anim" in v else "src"
+        videos.append({key: f"media/clip_{i}.{ext}", "loop": v.get("loop", False)})
 
     # every state / outline belongs to the first step that uses it
     states, geoms, steps = data["states"], data["geoms"], data["steps"]
@@ -189,3 +182,37 @@ def read_html(path) -> dict:
     if data_type == GZIP_TYPE:
         return json.loads(gzip.decompress(base64.b64decode(payload)))
     return json.loads(payload.replace("<\\/", "</"))
+
+
+# ---------------------------------------------------------------------------
+# One call: record a scene and write it
+# ---------------------------------------------------------------------------
+def export(scene_class, out, title: str | None = None, quiet: bool = False) -> Path:
+    """Record `scene_class` (a BridgeScene subclass) and write it to `out`:
+    a folder (main.html + steps/ + media/) or, if `out` ends in .html, one
+    self-contained file. Returns the page to open.
+
+        from manim_web_bridge import export
+        export(MyTalk, "talk/")            # or MyTalk.export("talk/")
+    """
+    import tempfile
+    import time
+    from manim import config
+
+    # manim still caches LaTeX / text outlines on disk; keep that out of the project
+    config.media_dir = str(Path(tempfile.gettempdir()) / "manim-web-bridge-media")
+    config.verbosity = "WARNING"
+
+    started = time.time()
+    data = scene_class().record()
+    out, title = Path(out), title or scene_class.__name__
+    if out.suffix == ".html":
+        page = write_html(data, out, title=title)
+        size = out.stat().st_size
+    else:
+        page = write_site(data, out, title=title)
+        size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
+    if not quiet:
+        print(f"{page}: {len(data['steps'])} steps, {len(data['states'])} states, "
+              f"{size / 1e6:.1f} MB ({time.time() - started:.1f}s)")
+    return page

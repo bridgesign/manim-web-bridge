@@ -15,7 +15,7 @@ camera does (Camera.set_cairo_context_path), so no conversion can drift.
              "w": 4.0}                     # stroke width (manim units)
     image   {"img": i, "x": cx, "y": cy, "iw": width, "ih": height, "o": opacity}
     video   {"vid": i, "x": cx, "y": cy, "iw": width, "ih": height, "o": opacity}
-            (videos: [{"src": WebM data URL, "loop"}] or [{"frames": [WebP data URLs], "fps", "loop"}])
+            (videos: [{"anim": WebP/GIF data URL, "loop"}] or [{"src": WebM data URL, "loop"}])
 
 The recorder then moves "p" into a shared outline bank (see recorder.py).
 """
@@ -62,21 +62,16 @@ class ImageBank:
         self.urls, self._index = [], {}
         self.videos, self._video_index = [], {}
 
-    def add_video(self, path: str, loop: bool = False, frames=None, fps: float = 15) -> int:
-        """A clip: either WebM (`path`) or a list of WebP frame files (`frames`)."""
-        key = (path, loop)
+    def add_video(self, path: str, loop: bool = False, anim: bool = False) -> int:
+        """A clip: an animated image (`anim`, WebP or GIF; the browser animates
+        it) or a WebM for a <video>."""
+        key = (path, loop, anim)
         if key not in self._video_index:
             self._video_index[key] = len(self.videos)
-            if frames:
-                # identical files (repeated frames) are stored once: "seq" indexes "frames"
-                unique = list(dict.fromkeys(frames))
-                urls = ["data:image/webp;base64," + base64.b64encode(Path(f).read_bytes()).decode() for f in unique]
-                seq = [unique.index(f) for f in frames]
-                self.videos.append({"frames": urls, "seq": seq, "fps": fps, "loop": bool(loop)})
-            else:
-                data = Path(path).read_bytes()
-                self.videos.append({"src": "data:video/webm;base64," + base64.b64encode(data).decode(),
-                                    "loop": bool(loop)})
+            ext = Path(path).suffix.lower().lstrip(".")
+            mime = {"webp": "image/webp", "gif": "image/gif", "webm": "video/webm"}.get(ext, "video/webm")
+            url = f"data:{mime};base64," + base64.b64encode(Path(path).read_bytes()).decode()
+            self.videos.append({"anim": url, "loop": bool(loop)} if anim else {"src": url, "loop": bool(loop)})
         return self._video_index[key]
 
     def add(self, pixels: np.ndarray) -> int:
@@ -109,8 +104,7 @@ def image_state(m: AbstractImageMobject, images: ImageBank) -> dict:
 def video_state(m, images: ImageBank) -> dict:
     cx, cy, _ = m.get_center()
     return {
-        "vid": images.add_video(m.video_path, getattr(m, "video_loop", False),
-                                getattr(m, "video_frames", None), getattr(m, "video_fps", 15)),
+        "vid": images.add_video(m.video_path, getattr(m, "video_loop", False), getattr(m, "video_anim", False)),
         "x": round(float(cx), DECIMALS), "y": round(float(cy), DECIMALS),
         "iw": round(float(m.width), DECIMALS), "ih": round(float(m.height), DECIMALS),
         "o": round(float(m.get_fill_opacity()), 3),

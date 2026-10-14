@@ -20,16 +20,17 @@ clip once and the player draws its current frame into that rectangle; it
 starts from the beginning when it comes on screen and pauses when it leaves.
 
 Two ways to embed (`embed=`):
-  "frames" (default)  the clip is decoded at build time (PyAV, which manim
-                      already uses; Pillow for GIF / animated WebP / APNG
-                      sources) into WebP images that the player flips
-                      on the canvas. Works in EVERY viewer, including VS
-                      Code's built-in browser, whose stripped-down media
-                      stack cannot decode common video codecs. No ffmpeg.
-  "webm"              a real VP9 WebM played by the browser's <video>:
-                      smaller for long clips, but needs a browser with full
-                      codecs (Chrome, Firefox, Edge; not VS Code). Converting
-                      needs ffmpeg (PATH or the optional `imageio-ffmpeg`).
+  "webp" (default)  ONE animated WebP that the browser animates itself
+                    (shown as an <img> over the canvas at the clip's place;
+                    fades are CSS opacity). An animated WebP / GIF source with
+                    no options is embedded as-is; otherwise it is re-encoded
+                    once (Pillow) with the crop / trim / speed / size applied.
+                    Works in every viewer, including VS Code's built-in
+                    browser (images, not video codecs). Video sources (MP4,
+                    WebM, ...) are read with PyAV, which manim already uses.
+  "webm"            a VP9 WebM in a muted <video> (smaller for long clips,
+                    but VS Code cannot play it). Needs ffmpeg (PATH or the
+                    optional `imageio-ffmpeg`).
 Both are cached by source content + options, so rebuilding does not
 re-encode.
 """
@@ -127,37 +128,28 @@ def _source_frames(source: Path):
             yield float(frame.time or 0.0), frame.to_image()
 
 
-def decode_frames(source: Path, crop=None, trim=None, height: int = 720, fps: float = 15,
-                  speed: float = 1.0, quality: int = 80) -> tuple[list[Path], dict]:
-    """Decode `source` into WebP frames at `fps` (of the OUTPUT timeline,
-    after trim and speed), cropped and scaled like encode_webm. Cached.
-    Returns (frame paths, {"w", "h", "seconds", "fps"})."""
+def encode_animated_webp(source: Path, crop=None, trim=None, height=720, speed: float = 1.0,
+                         loop: bool = True, quality: int = 80) -> tuple[Path, dict]:
+    """Re-encode `source` (video or animated image) as ONE animated WebP with
+    crop / trim / scale / speed applied; each frame keeps its own duration.
+    Cached. Returns (path, {"w", "h", "seconds"})."""
     from PIL import Image
 
     source = Path(source).resolve()
-    options = {"crop": crop, "trim": trim, "height": height, "fps": fps, "speed": speed, "q": quality}
+    options = {"crop": crop, "trim": trim, "height": height, "speed": speed, "loop": loop, "q": quality}
     key = hashlib.sha1(source.read_bytes() + json.dumps(options, sort_keys=True).encode()).hexdigest()[:20]
-    folder = CACHE_DIR / f"{key}_frames"
-    meta_path = folder / "meta.json"
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        return [folder / name for name in meta["files"]], meta
+    out = CACHE_DIR / f"{key}.webp"
+    meta_path = out.with_suffix(".json")
+    if out.exists() and meta_path.exists():
+        return out, json.loads(meta_path.read_text())
 
     t_start, t_end = trim if trim else (0.0, float("inf"))
-    frames, last_index = [], -1
-    folder.mkdir(parents=True, exist_ok=True)
+    times, images = [], []
     for t, img in _source_frames(source):
-        if t < t_start:
-            continue
-        if img is None or t > t_end:      # hold the last frame until the clip's end
-            end = round((min(t, t_end) - t_start) / speed * fps)
-            frames.extend([frames[-1]] * max(0, end - last_index - 1))
+        if img is None or t > t_end:          # end of the clip (or of the trim)
+            times.append(min(t, t_end))
             break
-        # sample the output timeline at `fps`: keep the first source frame
-        # for each output frame index (container timestamps are rounded,
-        # so compare indices, not times)
-        index = round((t - t_start) / speed * fps)
-        if index <= last_index:
+        if t < t_start:
             continue
         if crop:
             x, y, w, h = crop
@@ -165,15 +157,27 @@ def decode_frames(source: Path, crop=None, trim=None, height: int = 720, fps: fl
             img = img.crop((round(x * W), round(y * H), round((x + w) * W), round((y + h) * H)))
         if height and img.height != height:
             img = img.resize((round(img.width * height / img.height), height), Image.LANCZOS)
-        path = folder / f"{len(frames):05d}.webp"
-        img.save(path, "WEBP", quality=quality, method=6)
-        frames.extend([path] * (index - last_index))   # repeat a frame if the source skipped ahead
-        last_index = index
-    w, h = Image.open(frames[0]).size
-    meta = {"w": w, "h": h, "seconds": len(frames) / fps, "fps": fps, "count": len(frames),
-            "files": [p.name for p in frames]}
+        times.append(t)
+        images.append(img)
+    if len(times) == len(images):              # video ran out without an end marker
+        times.append(times[-1] + (times[-1] - times[0]) / max(1, len(times) - 1))
+    durations = [max(20, round((b - a) / speed * 1000)) for a, b in zip(times, times[1:])]
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    images[0].save(out, "WEBP", save_all=True, append_images=images[1:], duration=durations,
+                   loop=0 if loop else 1, quality=quality, method=4)
+    meta = {"w": images[0].width, "h": images[0].height, "seconds": sum(durations) / 1000}
     meta_path.write_text(json.dumps(meta))
-    return frames, meta
+    return out, meta
+
+
+def _image_meta(path: Path) -> dict:
+    from PIL import Image
+    with Image.open(path) as im:
+        seconds = 0.0
+        for k in range(getattr(im, "n_frames", 1)):
+            im.seek(k)
+            seconds += (im.info.get("duration") or 100) / 1000
+        return {"w": im.width, "h": im.height, "seconds": seconds}
 
 
 class VideoMobject(Rectangle):
@@ -181,32 +185,31 @@ class VideoMobject(Rectangle):
 
     def __init__(self, source, width: float = 8.0, *, crop=None, trim=None, height: int = 720,
                  fps=None, speed: float = 1.0, loop: bool = False, crf: int = 34,
-                 embed: str = "frames", quality: int = 70, **kwargs):
+                 embed: str = "webp", quality: int = 80, **kwargs):
         source = Path(source)
         self.video_loop = loop
-        self.video_frames = None
-        if embed == "frames":
-            frames, meta = decode_frames(source, crop, trim, height, fps or 15, speed, quality)
-            self.video_frames, self.video_fps = [str(p) for p in frames], meta["fps"]
-            self.video_path = str(Path(frames[0]).parent)    # identifies the clip
-            self.video_seconds = meta["seconds"]
-            kwargs.setdefault("stroke_width", 0)
-            kwargs.setdefault("fill_color", "#000000")
-            kwargs.setdefault("fill_opacity", 1.0)
-            super().__init__(width=width, height=width * meta["h"] / meta["w"], **kwargs)
-            return
-        if embed != "webm":
-            raise ValueError(f"embed must be 'frames' or 'webm', not {embed!r}")
-        meta = None
-        if source.suffix.lower() == ".webm" and not (crop or trim or fps or speed != 1.0):
-            meta = probe(source)                       # a WebM that is already small enough
-            if height is not None and meta["h"] > height:
-                meta = None                            # ... or needs scaling down
-        if meta is not None:
-            self.video_path = str(source.resolve())
+        if embed == "webp":
+            untouched = (source.suffix.lower() in (".webp", ".gif") and not (crop or trim or speed != 1.0)
+                         and (height is None or _image_meta(source)["h"] <= height))
+            if untouched:                                    # already an animated image: embed as-is
+                path, meta = source.resolve(), _image_meta(source)
+            else:
+                path, meta = encode_animated_webp(source, crop, trim, height, speed, loop, quality)
+            self.video_anim = True
+        elif embed == "webm":
+            meta = None
+            if source.suffix.lower() == ".webm" and not (crop or trim or fps or speed != 1.0):
+                meta = probe(source)                         # a WebM that is already small enough
+                if height is not None and meta["h"] > height:
+                    meta = None                              # ... or needs scaling down
+            if meta is not None:
+                path = source.resolve()
+            else:
+                path, meta = encode_webm(source, crop, trim, height, fps, speed, crf)
+            self.video_anim = False
         else:
-            path, meta = encode_webm(source, crop, trim, height, fps, speed, crf)
-            self.video_path = str(path)
+            raise ValueError(f"embed must be 'webp' or 'webm', not {embed!r}")
+        self.video_path = str(path)
         self.video_seconds = meta["seconds"]          # handy for deck.wait(...)
         kwargs.setdefault("stroke_width", 0)
         kwargs.setdefault("fill_color", "#000000")

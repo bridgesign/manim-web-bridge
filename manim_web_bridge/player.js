@@ -82,40 +82,25 @@ function imageEl(i) {
   if (!imageCache[i]) { const im = new Image(); im.onload = () => draw(); im.src = DATA.images[i]; imageCache[i] = im; }
   return imageCache[i];
 }
-// Videos (VideoMobject): muted so the browser lets them autoplay.
-// A frame-sequence clip ({frames: [...], fps, loop}) behaves like a <video>:
-// play/pause/currentTime, plus frame() for the image to draw now.
-function framePlayer({ frames, seq, fps, loop }) {
-  const imgs = frames.map((src) => { const im = new Image(); im.onload = () => draw(); im.src = src; return im; });
-  let t0 = 0, at = 0, playing = false;
-  const clock = () => performance.now() / 1000;
-  return {
-    get readyState() { return imgs[0].complete ? 4 : 0; },
-    get paused() { return !playing; },
-    get currentTime() { return playing ? clock() - t0 : at; },
-    set currentTime(v) { at = v; t0 = clock() - v; },
-    play() { t0 = clock() - at; playing = true; return Promise.resolve(); },
-    pause() { at = this.currentTime; playing = false; },
-    frame() {
-      const order = seq || imgs.map((_, k) => k), i = Math.floor(this.currentTime * fps);
-      return imgs[order[loop ? i % order.length : Math.min(i, order.length - 1)]];
-    },
-  };
-}
-
+// Clips (VideoMobject), created on first use:
+//  * {anim: url}  an animated WebP / GIF. Browsers only animate images they
+//    actually show, so it is a real <img> placed over the canvas at the
+//    clip's rectangle (see syncOverlays); a fresh element each time it
+//    comes on screen restarts it.
+//  * {src: url}   a WebM in a muted <video>, drawn into the canvas.
 const videoCache = [];
 function videoEl(i) {
   if (!videoCache[i]) videoCache[i] = makeClip(DATA.videos[i]);
   return videoCache[i];
 }
 function makeClip(entry) {
-  if (entry.frames) return framePlayer(entry);
   const { src, loop } = typeof entry === "string" ? { src: entry, loop: false } : entry;
   const v = document.createElement("video");
   Object.assign(v, { src, loop, muted: true, playsInline: true, preload: "auto" });
   v.addEventListener("loadeddata", () => draw());
   return v;
 }
+const isAnim = (look) => look.vid !== undefined && DATA.videos[look.vid].anim !== undefined;
 
 const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 const css = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -145,9 +130,10 @@ function tracePath(p) {
 
 function paint(look) {
   if (look.img !== undefined || look.vid !== undefined) {
+    if (isAnim(look)) return;                          // drawn as an <img> overlay instead
     const v = look.vid !== undefined ? videoEl(look.vid) : null;
-    const im = v ? (v.frame ? v.frame() : v) : imageEl(look.img);
-    const ready = v ? v.readyState >= 2 && (!v.frame || im.complete) : im.complete;
+    const im = v || imageEl(look.img);
+    const ready = v ? v.readyState >= 2 : im.complete;
     if (!ready || look.o <= 0) return;
     ctx.save();
     ctx.globalAlpha = look.o;
@@ -181,14 +167,38 @@ function draw() {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(s, 0, 0, -s, canvas.width / 2, canvas.height / 2);   // manim frame -> pixels
   ctx.lineJoin = "miter"; ctx.lineCap = "butt"; ctx.miterLimit = 10;   // Cairo defaults
-  const visibleVideos = new Set();
+  const visibleVideos = new Set(), overlays = [];
   for (const u of order) {
     const l = looks.get(u);
     if (!l) continue;
     paint(l);
-    if (l.vid !== undefined && l.o > 0) visibleVideos.add(l.vid);
+    if (isAnim(l)) { if (l.o > 0) overlays.push(l); }
+    else if (l.vid !== undefined && l.o > 0) visibleVideos.add(l.vid);
   }
   syncVideos(visibleVideos);
+  syncOverlays(overlays);
+}
+
+// Animated images: one <img> per visible clip, kept over its rectangle.
+const overlayEls = new Map();            // vid -> <img>
+function syncOverlays(list) {
+  const r = canvas.getBoundingClientRect(), k = r.width / FW;
+  const want = new Set(list.map((l) => l.vid));
+  for (const [vid, el] of overlayEls) if (!want.has(vid)) { el.remove(); overlayEls.delete(vid); }
+  for (const l of list) {
+    let el = overlayEls.get(l.vid);
+    if (!el) {                                         // new on screen: a fresh element restarts the animation
+      el = document.createElement("img");
+      el.src = DATA.videos[l.vid].anim;
+      Object.assign(el.style, { position: "fixed", pointerEvents: "none", imageRendering: "auto" });
+      document.body.appendChild(el);
+      overlayEls.set(l.vid, el);
+    }
+    Object.assign(el.style, {
+      left: `${r.left + (l.x - l.iw / 2 + FW / 2) * k}px`, top: `${r.top + (FH / 2 - l.y - l.ih / 2) * k}px`,
+      width: `${l.iw * k}px`, height: `${l.ih * k}px`, opacity: String(l.o),
+    });
+  }
 }
 
 // A video starts from the beginning when it comes on screen, pauses when it
@@ -389,7 +399,8 @@ document.addEventListener("keydown", (e) => {
 canvas.addEventListener("click", next);
 
 // for tests / automation
-window.bridge = { next, prev, jump, steps: N_STEPS, get current() { return current; }, get _videos() { return videoCache; } };
+window.bridge = { next, prev, jump, steps: N_STEPS, get current() { return current; },
+                  get _videos() { return videoCache; }, get _overlays() { return [...overlayEls.values()]; } };
 
 resize();
 const fromHash = parseInt(location.hash.slice(1), 10);

@@ -10,9 +10,12 @@ Write a normal [manim](https://www.manim.community/) (Community Edition) scene
 in Python, get a web page that plays it in the browser: no video rendering,
 no server, no CDN, no JavaScript dependencies.
 
+```python
+Demo.export("out/")          # folder: open out/main.html   (or export(Demo, "out/"))
+Demo.export("out.html")      # or one self-contained file
+```
 ```bash
-python -m manim_web_bridge examples/demo.py Demo out/        # folder: open out/main.html
-python -m manim_web_bridge examples/demo.py Demo out.html    # or one self-contained file
+python -m manim_web_bridge examples/demo.py Demo out/        # the same from the shell
 ```
 
 **Folder** (default): `main.html` + `steps/step_NNN.js` (one plain-JS chunk per
@@ -110,27 +113,26 @@ few bytes, not a new outline.
 
 ```python
 from manim_web_bridge import VideoMobject
-clip = VideoMobject("replay.webm", width=7.0,
+clip = VideoMobject("replay.webp", width=7.0,       # animated WebP / GIF, or a video (MP4, WebM, ...)
                     crop=(0.30, 0.10, 0.48, 0.65),  # zoom: (x, y, w, h) fractions of the frame
                     trim=(0.0, 4.0),                # cut: source seconds
-                    speed=0.5, height=720, fps=15, loop=True,
-                    embed="frames")                 # or "webm"
+                    speed=0.5, height=720, loop=True)
 self.play(FadeIn(clip)); self.wait(clip.video_seconds)
 ```
 
-A rectangle in Python (so layout, fades and moves work); the player draws the
-clip into it, restarting it when it comes on screen and pausing it when it
-leaves. Two ways to embed:
+A rectangle in Python (layout, fades and moves work as for any mobject).
 
 | `embed=` | What is embedded | Plays in | Needs |
 | --- | --- | --- | --- |
-| `"frames"` (default) | WebP images, flipped by the player | **every** viewer, incl. VS Code's built-in browser | nothing extra (PyAV comes with manim; Pillow reads GIF / animated WebP / APNG sources) |
-| `"webm"` | VP9 WebM in a muted `<video>` | Chrome, Firefox, Edge — **not** VS Code (its media stack lacks the codecs) | ffmpeg to convert (PATH or `[video]` extra) |
+| `"webp"` (default) | ONE animated WebP (or the GIF/WebP source as-is), shown as an `<img>` over the canvas; the browser animates it | every viewer, incl. VS Code's built-in browser | nothing extra (Pillow; PyAV for video sources — both come with manim) |
+| `"webm"` | VP9 WebM in a muted `<video>` drawn into the canvas | Chrome, Firefox, Edge — not VS Code | ffmpeg (PATH or `[video]` extra) |
 
-`"frames"` is larger per second (one image per frame), so keep clips short
-(crop + trim). Tip: keep source clips as **animated WebP** (or GIF): unlike
-WebM/MP4 they also open directly in VS Code. Both are cached in `~/.cache/manim-web-bridge/video/` by source
-content + options.
+Browsers only animate images they actually show, so animated clips are real
+`<img>` elements kept over their rectangle (fades = CSS opacity; a fresh
+element each time the clip comes on screen restarts it). They are drawn above
+the canvas. Keep source clips as animated WebP/GIF: unlike WebM/MP4 they also
+open directly in VS Code. Conversions are cached in
+`~/.cache/manim-web-bridge/video/`.
 
 ## Files
 
@@ -140,7 +142,7 @@ content + options.
 | `manim_web_bridge/recorder.py` | records `play`/`wait`/`next_slide` into steps |
 | `manim_web_bridge/geometry.py` | mobject → state (points, style, images) |
 | `manim_web_bridge/export.py` | writes the HTML page |
-| `manim_web_bridge/media.py` | `VideoMobject`: clips as WebP frames or WebM (crop/trim/scale/speed/loop) |
+| `manim_web_bridge/media.py` | `VideoMobject`: clips as animated WebP or WebM (crop/trim/scale/speed/loop) |
 | `manim_web_bridge/player.js` | canvas player (drawing, interpolation, navigation) |
 | `manim_web_bridge/__main__.py` | CLI: `python -m manim_web_bridge file.py Scene [out.html]` |
 | `examples/demo.py` | one scene exercising every recording path |
@@ -166,7 +168,7 @@ Delete screenshot folders afterwards.
   or approximated.
 - Text and LaTeX become outlines (not selectable in the page). Each glyph size is its own
   outline, so text-heavy decks are a few MB even compressed.
-- Images (`ImageMobject`) are embedded as PNG and clips (`VideoMobject`) as WebP frames (or WebM); everything else is vector, drawn on the canvas.
+- Images (`ImageMobject`) are embedded as PNG and clips (`VideoMobject`) as animated WebP (or WebM); everything else is vector, drawn on the canvas. Animated clips are `<img>` overlays, so they always sit above canvas content.
 - `frames` fallback stores every changed leaf per frame: long updater-driven
   animations of many shapes make big files. Prefer tweens where you can.
 - Python-side `wait()` without updaters is just a pause; with updaters it is sampled.
