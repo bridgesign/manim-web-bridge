@@ -14,6 +14,8 @@ from playwright.async_api import async_playwright
 
 
 async def main(page_path: Path, out: Path, width: int, only=None, film=None, every=0.25, count=12):
+    if page_path.is_dir():                 # a deck folder: open its main.html
+        page_path = page_path / "main.html"
     out.mkdir(parents=True, exist_ok=True)
     errors = []
     async with async_playwright() as p:

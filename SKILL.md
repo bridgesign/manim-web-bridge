@@ -17,8 +17,9 @@ description: Turn a manim (Community Edition) scene or slide deck into one self-
 ## Build a page
 1. Subclass `BridgeScene` instead of `Scene` (`from manim_web_bridge import BridgeScene`).
    Use `self.next_slide()` where the viewer should click. Everything else is plain manim.
-2. Export: `python -m manim_web_bridge path/to/file.py SceneName out.html`
-   (the file's folder is put on `sys.path`, so decks can import sibling modules).
+2. Export: `python -m manim_web_bridge path/to/file.py SceneName out/` (folder: open
+   `out/main.html`; steps load on demand) or `... out.html` (one self-contained file).
+   The file's folder is put on `sys.path`, so decks can import sibling modules.
 3. The CLI prints steps, number of states and file size. Several MB is fine.
    If it's tens of MB, look for long updater-driven animations (they fall back to frames).
 
@@ -40,7 +41,7 @@ Open the PNGs and actually look. Compare with what manim would render
 | Morph looks wrong | `align_points` in `_record_tracks`; `lerpLook()` in `player.js` |
 | Timing off with lag / LaggedStart | `_plan()` windows vs manim `get_sub_alpha` / `anims_with_timings` |
 | Huge file | `frames` commands; inspect `data["steps"][i]["cmds"]` ops |
-| Page blank | browser console via `tests/snapshot.py`; old browsers lack `DecompressionStream` -> export with `write_html(..., compress=False)` |
+| Page blank | browser console via `tests/snapshot.py`; folder form: check `steps/step_NNN.js` exist next to `main.html`; old browsers lack `DecompressionStream` -> export with `write_html(..., compress=False)` |
 | Video does not play | use `embed="frames"` (default; works everywhere). `embed="webm"` fails in viewers without VP9, e.g. VS Code |
 | Need the recorded data | `from manim_web_bridge import read_html; data = read_html('out.html')` |
 

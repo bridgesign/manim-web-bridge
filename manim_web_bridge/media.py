@@ -21,7 +21,8 @@ starts from the beginning when it comes on screen and pauses when it leaves.
 
 Two ways to embed (`embed=`):
   "frames" (default)  the clip is decoded at build time (PyAV, which manim
-                      already uses) into WebP images that the player flips
+                      already uses; Pillow for GIF / animated WebP / APNG
+                      sources) into WebP images that the player flips
                       on the canvas. Works in EVERY viewer, including VS
                       Code's built-in browser, whose stripped-down media
                       stack cannot decode common video codecs. No ffmpeg.
@@ -107,12 +108,30 @@ def encode_webm(source: Path, crop=None, trim=None, height: int = 720, fps=None,
     return out, meta
 
 
+def _source_frames(source: Path):
+    """(time in seconds, PIL image) for every frame of a video (PyAV) or an
+    animated image -- GIF, animated WebP, APNG -- (Pillow, using each
+    frame's own duration)."""
+    from PIL import Image, ImageSequence
+    if source.suffix.lower() in (".gif", ".webp", ".png", ".apng"):
+        with Image.open(source) as im:
+            t = 0.0
+            for frame in ImageSequence.Iterator(im):
+                yield t, frame.convert("RGB")
+                t += (frame.info.get("duration") or 100) / 1000
+            yield t, None          # end marker: the last frame lasts its full duration
+        return
+    import av
+    with av.open(str(source)) as container:
+        for frame in container.decode(video=0):
+            yield float(frame.time or 0.0), frame.to_image()
+
+
 def decode_frames(source: Path, crop=None, trim=None, height: int = 720, fps: float = 15,
                   speed: float = 1.0, quality: int = 80) -> tuple[list[Path], dict]:
     """Decode `source` into WebP frames at `fps` (of the OUTPUT timeline,
     after trim and speed), cropped and scaled like encode_webm. Cached.
     Returns (frame paths, {"w", "h", "seconds", "fps"})."""
-    import av
     from PIL import Image
 
     source = Path(source).resolve()
@@ -127,30 +146,29 @@ def decode_frames(source: Path, crop=None, trim=None, height: int = 720, fps: fl
     t_start, t_end = trim if trim else (0.0, float("inf"))
     frames, last_index = [], -1
     folder.mkdir(parents=True, exist_ok=True)
-    with av.open(str(source)) as container:
-        for frame in container.decode(video=0):
-            t = float(frame.time or 0.0)
-            if t < t_start:
-                continue
-            if t > t_end:
-                break
-            # sample the output timeline at `fps`: keep the first source frame
-            # for each output frame index (container timestamps are rounded,
-            # so compare indices, not times)
-            index = round((t - t_start) / speed * fps)
-            if index <= last_index:
-                continue
-            img = frame.to_image()
-            if crop:
-                x, y, w, h = crop
-                W, H = img.size
-                img = img.crop((round(x * W), round(y * H), round((x + w) * W), round((y + h) * H)))
-            if height and img.height != height:
-                img = img.resize((round(img.width * height / img.height), height), Image.LANCZOS)
-            path = folder / f"{len(frames):05d}.webp"
-            img.save(path, "WEBP", quality=quality, method=6)
-            frames.extend([path] * (index - last_index))   # repeat a frame if the source skipped ahead
-            last_index = index
+    for t, img in _source_frames(source):
+        if t < t_start:
+            continue
+        if img is None or t > t_end:      # hold the last frame until the clip's end
+            end = round((min(t, t_end) - t_start) / speed * fps)
+            frames.extend([frames[-1]] * max(0, end - last_index - 1))
+            break
+        # sample the output timeline at `fps`: keep the first source frame
+        # for each output frame index (container timestamps are rounded,
+        # so compare indices, not times)
+        index = round((t - t_start) / speed * fps)
+        if index <= last_index:
+            continue
+        if crop:
+            x, y, w, h = crop
+            W, H = img.size
+            img = img.crop((round(x * W), round(y * H), round((x + w) * W), round((y + h) * H)))
+        if height and img.height != height:
+            img = img.resize((round(img.width * height / img.height), height), Image.LANCZOS)
+        path = folder / f"{len(frames):05d}.webp"
+        img.save(path, "WEBP", quality=quality, method=6)
+        frames.extend([path] * (index - last_index))   # repeat a frame if the source skipped ahead
+        last_index = index
     w, h = Image.open(frames[0]).size
     meta = {"w": w, "h": h, "seconds": len(frames) / fps, "fps": fps, "count": len(frames),
             "files": [p.name for p in frames]}

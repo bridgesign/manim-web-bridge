@@ -1,5 +1,16 @@
 """
-Write the recorded data + the player into ONE self-contained HTML file.
+Write the recorded data + the player as a web page.
+
+  write_site(data, "deck/")    a folder: main.html + one small script per
+                               step + media files. The player loads a step's
+                               data right before showing it and prefetches
+                               the next one, so opening the deck is instant
+                               however long it is. Works from file:// (the
+                               chunks are <script> files, media are <img>
+                               files: no fetch(), no server needed).
+  write_html(data, "deck.html") ONE self-contained file (everything inlined,
+                               gzipped), handy for sending a single file.
+  read_html(path)              the recorded data back from either form.
 
 No server, no CDN, no build step: the page is the data plus player.js
 (plain JavaScript drawing on a <canvas>). The data -- mostly vector outlines
@@ -12,6 +23,7 @@ import base64
 import gzip
 import json
 import re
+import shutil
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -31,7 +43,7 @@ PAGE = """<!doctype html>
 </head>
 <body>
 <canvas id="stage"></canvas>
-<script id="bridge-data" type="{data_type}">{data}</script>
+<script id="{data_id}" type="{data_type}">{data}</script>
 <script type="module">{player}</script>
 </body>
 </html>
@@ -53,6 +65,7 @@ def write_html(data: dict, path, title: str = "Slides", compress: bool = True) -
         title=title,
         background=data["background"],
         aspect=w / h,
+        data_id="bridge-data",
         data_type=data_type,
         data=payload,
         player=(HERE / "player.js").read_text(),
@@ -60,9 +73,118 @@ def write_html(data: dict, path, title: str = "Slides", compress: bool = True) -
     return path
 
 
+# ---------------------------------------------------------------------------
+# Folder output: main.html + steps/step_NNN.js + media/
+# ---------------------------------------------------------------------------
+def _step_refs(step: dict) -> set:
+    """State indices a step uses (its commands and its end snapshot)."""
+    refs = {s for _, s in step["end"]}
+    for c in step["cmds"]:
+        if c["op"] == "set":
+            refs |= {s for _, s in c["d"]}
+        elif c["op"] == "play":
+            refs |= {t["a"] for t in c["tr"]} | {t["b"] for t in c["tr"]}
+        elif c["op"] == "frames":
+            refs |= {s for f in c["f"] for _, s in f["u"]}
+    return refs
+
+
+def _data_url_bytes(url: str) -> tuple[bytes, str]:
+    head, b64 = url.split(",", 1)
+    mime = head[5:].split(";")[0]
+    ext = {"image/png": "png", "image/webp": "webp", "image/jpeg": "jpg", "video/webm": "webm"}.get(mime, "bin")
+    return base64.b64decode(b64), ext
+
+
+def write_site(data: dict, folder, title: str = "Slides") -> Path:
+    """Write the deck as a folder (see module docstring). Returns main.html."""
+    folder = Path(folder)
+    for sub in ("steps", "media"):              # only the folders this writer owns
+        shutil.rmtree(folder / sub, ignore_errors=True)
+        (folder / sub).mkdir(parents=True)
+
+    # media -> files; the header keeps only their relative URLs
+    images = []
+    for i, url in enumerate(data["images"]):
+        raw, ext = _data_url_bytes(url)
+        (folder / "media" / f"img_{i}.{ext}").write_bytes(raw)
+        images.append(f"media/img_{i}.{ext}")
+    videos = []
+    for i, v in enumerate(data.get("videos", [])):
+        if "frames" in v:
+            clip = folder / "media" / f"clip_{i}"
+            clip.mkdir()
+            urls = []
+            for j, url in enumerate(v["frames"]):
+                raw, ext = _data_url_bytes(url)
+                (clip / f"{j:05d}.{ext}").write_bytes(raw)
+                urls.append(f"media/clip_{i}/{j:05d}.{ext}")
+            videos.append({**v, "frames": urls})
+        else:
+            raw, ext = _data_url_bytes(v["src"])
+            (folder / "media" / f"clip_{i}.{ext}").write_bytes(raw)
+            videos.append({"src": f"media/clip_{i}.{ext}", "loop": v.get("loop", False)})
+
+    # every state / outline belongs to the first step that uses it
+    states, geoms, steps = data["states"], data["geoms"], data["steps"]
+    refs = [_step_refs(st) for st in steps]
+    s_owner = [0] * len(states)
+    seen = set()
+    for k, r in enumerate(refs):
+        for s in r - seen:
+            s_owner[s] = k
+        seen |= r
+    g_owner = {}
+    for s, st in enumerate(states):
+        if "g" in st:
+            g_owner[st["g"]] = min(g_owner.get(st["g"], s_owner[s]), s_owner[s])
+    deps = []
+    for k, r in enumerate(refs):
+        need = {k} | {s_owner[s] for s in r} | {g_owner[states[s]["g"]] for s in r if "g" in states[s]}
+        deps.append(sorted(need))
+    for k, step in enumerate(steps):
+        chunk = {"step": step,
+                 "states": {s: states[s] for s in range(len(states)) if s_owner[s] == k},
+                 "geoms": {g: geoms[g] for g, o in g_owner.items() if o == k}}
+        (folder / "steps" / f"step_{k:03d}.js").write_text(
+            f"__bridgeChunk({k},{json.dumps(chunk, separators=(',', ':'))});\n")
+
+    head = {"version": 2, "frame": data["frame"], "background": data["background"],
+            "images": images, "videos": videos, "deps": deps}
+    w, h = data["frame"]
+    index = folder / "main.html"
+    index.write_text(PAGE.format(
+        title=title, background=data["background"], aspect=w / h,
+        data_id="bridge-head", data_type="application/json",
+        data=json.dumps(head, separators=(",", ":")).replace("</", "<\\/"),
+        player=(HERE / "player.js").read_text(),
+    ))
+    return index
+
+
 def read_html(path) -> dict:
-    """The recorded data embedded in an exported page (compressed or not)."""
-    m = re.search(r'<script id="bridge-data" type="([^"]+)">(.*?)</script>', Path(path).read_text(), re.S)
+    """The recorded data of an exported deck: a single .html file, or a
+    folder / its main.html written by write_site."""
+    path = Path(path)
+    if path.is_dir():
+        path = path / "main.html"
+    text = path.read_text()
+    head = re.search(r'<script id="bridge-head" type="application/json">(.*?)</script>', text, re.S)
+    if head:
+        h = json.loads(head.group(1).replace("<\\/", "</"))
+        data = {"version": 2, "frame": h["frame"], "background": h["background"], "images": h["images"],
+                "videos": h["videos"], "states": [], "geoms": [], "steps": []}
+        states, geoms = {}, {}
+        for k in range(len(h["deps"])):
+            js = (path.parent / "steps" / f"step_{k:03d}.js").read_text()
+            chunk = json.loads(js[js.index(",") + 1: js.rindex(")")])
+            states.update({int(i): v for i, v in chunk["states"].items()})
+            geoms.update({int(i): v for i, v in chunk["geoms"].items()})
+            data["steps"].append(chunk["step"])
+        data["states"] = [states[i] for i in range(len(states))]
+        data["geoms"] = [geoms[i] for i in range(len(geoms))]
+        return data
+    m = re.search(r'<script id="bridge-data" type="([^"]+)">(.*?)</script>', text, re.S)
     data_type, payload = m.group(1), m.group(2)
     if data_type == GZIP_TYPE:
         return json.loads(gzip.decompress(base64.b64decode(payload)))

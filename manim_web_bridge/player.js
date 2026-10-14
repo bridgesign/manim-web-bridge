@@ -13,8 +13,16 @@
 //   prev: ArrowLeft, PageUp, Backspace                (jumps to the previous step's end)
 //   Home / End, F = fullscreen. The URL hash (#12) shows step 12 directly.
 
-// The data is gzip + base64 by default (see export.py); plain JSON also works.
+// Two page forms (see export.py):
+//  * folder (main.html): a small header (#bridge-head) + one script per step,
+//    steps/step_NNN.js, loaded right before the step is shown;
+//  * single file: everything inline in #bridge-data (gzip + base64, or JSON).
+const HEAD = document.getElementById("bridge-head");
 async function loadData() {
+  if (HEAD) {
+    const h = JSON.parse(HEAD.textContent);
+    return { ...h, states: [], geoms: [], steps: new Array(h.deps.length) };
+  }
   const el = document.getElementById("bridge-data");
   if (el.type === "application/json") return JSON.parse(el.textContent);
   const bytes = Uint8Array.from(atob(el.textContent.trim()), (c) => c.charCodeAt(0));
@@ -22,6 +30,31 @@ async function loadData() {
   return JSON.parse(await new Response(stream).text());
 }
 const DATA = await loadData();
+const N_STEPS = DATA.steps.length;
+
+// Chunk k (folder form) calls __bridgeChunk(k, {step, states, geoms}).
+const chunkWaiters = new Map(), chunkLoads = new Map();
+window.__bridgeChunk = (k, c) => {
+  for (const i in c.states) DATA.states[i] = c.states[i];
+  for (const i in c.geoms) DATA.geoms[i] = c.geoms[i];
+  DATA.steps[k] = c.step;
+  chunkWaiters.get(k)?.();
+};
+function loadChunk(k) {
+  if (!HEAD || DATA.steps[k]) return Promise.resolve();
+  if (!chunkLoads.has(k)) {
+    chunkLoads.set(k, new Promise((resolve, reject) => {
+      chunkWaiters.set(k, resolve);
+      const s = document.createElement("script");      // <script>, not fetch(): works from file://
+      s.src = `steps/step_${String(k).padStart(3, "0")}.js`;
+      s.onerror = () => reject(new Error("cannot load " + s.src));
+      document.head.appendChild(s);
+    }));
+  }
+  return chunkLoads.get(k);
+}
+// Everything step k needs: its own chunk + the chunks that introduced what it shows.
+const ensureStep = (k) => (HEAD ? Promise.all(DATA.deps[k].map(loadChunk)) : Promise.resolve());
 const [FW, FH] = DATA.frame;
 const LINE_WIDTH_MULTIPLE = 0.01;          // manim Camera.cairo_line_width_multiple
 
@@ -42,7 +75,13 @@ window.addEventListener("resize", resize);
 // ---------------------------------------------------------------------------
 // Shapes: a "look" is {pts: Float64Array of x,y,..., f, fo, c, co, w} or an image
 // ---------------------------------------------------------------------------
-const images = DATA.images.map((src) => { const im = new Image(); im.onload = () => draw(); im.src = src; return im; });
+// Images and clips are created on first use (in the folder form their files
+// are only fetched then).
+const imageCache = [];
+function imageEl(i) {
+  if (!imageCache[i]) { const im = new Image(); im.onload = () => draw(); im.src = DATA.images[i]; imageCache[i] = im; }
+  return imageCache[i];
+}
 // Videos (VideoMobject): muted so the browser lets them autoplay.
 // A frame-sequence clip ({frames: [...], fps, loop}) behaves like a <video>:
 // play/pause/currentTime, plus frame() for the image to draw now.
@@ -64,14 +103,19 @@ function framePlayer({ frames, seq, fps, loop }) {
   };
 }
 
-const videos = (DATA.videos || []).map((entry) => {
+const videoCache = [];
+function videoEl(i) {
+  if (!videoCache[i]) videoCache[i] = makeClip(DATA.videos[i]);
+  return videoCache[i];
+}
+function makeClip(entry) {
   if (entry.frames) return framePlayer(entry);
   const { src, loop } = typeof entry === "string" ? { src: entry, loop: false } : entry;
   const v = document.createElement("video");
   Object.assign(v, { src, loop, muted: true, playsInline: true, preload: "auto" });
   v.addEventListener("loadeddata", () => draw());
   return v;
-});
+}
 
 const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 const css = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -101,8 +145,8 @@ function tracePath(p) {
 
 function paint(look) {
   if (look.img !== undefined || look.vid !== undefined) {
-    const v = look.vid !== undefined ? videos[look.vid] : null;
-    const im = v ? (v.frame ? v.frame() : v) : images[look.img];
+    const v = look.vid !== undefined ? videoEl(look.vid) : null;
+    const im = v ? (v.frame ? v.frame() : v) : imageEl(look.img);
     const ready = v ? v.readyState >= 2 && (!v.frame || im.complete) : im.complete;
     if (!ready || look.o <= 0) return;
     ctx.save();
@@ -151,8 +195,8 @@ function draw() {
 // leaves, and keeps the canvas redrawing while it plays.
 let liveVideos = new Set(), videoLoop = false;
 function syncVideos(visible) {
-  for (const i of visible) if (!liveVideos.has(i)) { videos[i].currentTime = 0; videos[i].play().catch(() => {}); }
-  for (const i of liveVideos) if (!visible.has(i)) videos[i].pause();
+  for (const i of visible) if (!liveVideos.has(i)) { videoEl(i).currentTime = 0; videoEl(i).play().catch(() => {}); }
+  for (const i of liveVideos) if (!visible.has(i)) videoEl(i).pause();
   liveVideos = visible;
   if (liveVideos.size && !videoLoop) {
     videoLoop = true;
@@ -295,14 +339,17 @@ async function wait(cmd) {
 // ---------------------------------------------------------------------------
 let current = -1, running = null;
 
-function jump(i) {
-  current = Math.max(0, Math.min(DATA.steps.length - 1, i));
+async function jump(i) {
+  const k = Math.max(0, Math.min(N_STEPS - 1, i));
+  await ensureStep(k);
+  current = k;
   setDisplay(DATA.steps[current].end);
   draw();
   history.replaceState(null, "", "#" + current);
 }
 
 async function runStep(i) {
+  await ensureStep(i);
   current = i;
   history.replaceState(null, "", "#" + i);
   cancel = false;
@@ -312,7 +359,8 @@ async function runStep(i) {
     else if (cmd.op === "frames") await frames(cmd);
     else if (cmd.op === "wait") await wait(cmd);
   }
-  jump(i);                                           // land exactly on the recorded end state
+  await jump(i);                                     // land exactly on the recorded end state
+  if (i + 1 < N_STEPS) ensureStep(i + 1).catch(() => {});   // prefetch while the speaker talks
   window.__bridgeIdle = true;
 }
 
@@ -323,27 +371,27 @@ function start(i) {
 
 async function next() {
   if (running) { cancel = true; await running; return; }   // first click finishes the step
-  if (current + 1 < DATA.steps.length) start(current + 1);
+  if (current + 1 < N_STEPS) start(current + 1);
 }
 
 async function prev() {
   if (running) { cancel = true; await running; }
-  jump(current - 1);
+  await jump(current - 1);
 }
 
 document.addEventListener("keydown", (e) => {
   if (["ArrowRight", " ", "PageDown", "Enter"].includes(e.key)) { e.preventDefault(); next(); }
   else if (["ArrowLeft", "PageUp", "Backspace"].includes(e.key)) { e.preventDefault(); prev(); }
   else if (e.key === "Home") jump(0);
-  else if (e.key === "End") jump(DATA.steps.length - 1);
+  else if (e.key === "End") jump(N_STEPS - 1);
   else if (e.key === "f") document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
 });
 canvas.addEventListener("click", next);
 
 // for tests / automation
-window.bridge = { next, prev, jump, steps: DATA.steps.length, get current() { return current; }, _videos: videos };
+window.bridge = { next, prev, jump, steps: N_STEPS, get current() { return current; }, get _videos() { return videoCache; } };
 
 resize();
 const fromHash = parseInt(location.hash.slice(1), 10);
-if (Number.isInteger(fromHash)) { jump(fromHash); window.__bridgeIdle = true; }
+if (Number.isInteger(fromHash)) { await jump(fromHash); window.__bridgeIdle = true; }
 else start(0);

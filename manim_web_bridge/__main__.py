@@ -1,9 +1,10 @@
 """
-Command line:  python -m manim_web_bridge <file.py> <SceneName> [out.html]
+Command line:  python -m manim_web_bridge <file.py> <SceneName> [out]
 
 Imports the file (its folder is put on sys.path so it can import siblings),
 runs the scene's construct() with recording instead of rendering, and writes
-one self-contained HTML file.
+  out/          a folder: out/main.html + steps/ + media/ (default: <SceneName>/)
+  out.html      one self-contained HTML file
 """
 
 import argparse
@@ -26,7 +27,7 @@ def main():
     config.media_dir = str(Path(tempfile.gettempdir()) / "manim-web-bridge-media")
     config.verbosity = "WARNING"
 
-    from .export import write_html
+    from .export import write_html, write_site
 
     src = args.file.resolve()
     sys.path.insert(0, str(src.parent))
@@ -37,10 +38,15 @@ def main():
 
     t = time.time()
     data = scene_cls().record()
-    out = args.out or src.with_name(f"{args.scene}.html")
-    write_html(data, out, title=args.scene)
+    out = args.out or src.with_name(args.scene)
+    if out.suffix == ".html":
+        write_html(data, out, title=args.scene)
+        size, page = out.stat().st_size, out
+    else:
+        page = write_site(data, out, title=args.scene)
+        size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     steps, states = len(data["steps"]), len(data["states"])
-    print(f"{out}: {steps} steps, {states} states, {out.stat().st_size / 1e6:.1f} MB ({time.time() - t:.1f}s)")
+    print(f"{page}: {steps} steps, {states} states, {size / 1e6:.1f} MB ({time.time() - t:.1f}s)")
 
 
 if __name__ == "__main__":

@@ -7,12 +7,21 @@
 # manim-web-bridge
 
 Write a normal [manim](https://www.manim.community/) (Community Edition) scene
-in Python, get **one self-contained HTML file** that plays it in the browser:
-no video, no server, no CDN, no JavaScript dependencies.
+in Python, get a web page that plays it in the browser: no video rendering,
+no server, no CDN, no JavaScript dependencies.
 
 ```bash
-python -m manim_web_bridge examples/demo.py Demo out.html   # then open out.html
+python -m manim_web_bridge examples/demo.py Demo out/        # folder: open out/main.html
+python -m manim_web_bridge examples/demo.py Demo out.html    # or one self-contained file
 ```
+
+**Folder** (default): `main.html` + `steps/step_NNN.js` (one plain-JS chunk per
+step: its commands plus the shapes it introduces) + `media/` (images, clip
+frames). The player loads a step's chunks right before showing it and
+prefetches the next one, so a long deck opens instantly. Chunks are `<script>`
+files and media are `<img>` files, so it works from `file://` (no `fetch`, no
+server). **Single file** (`.html`): everything inlined and gzipped, for
+sending one file.
 
 ```python
 from manim import *
@@ -64,10 +73,10 @@ your Scene (Python)  ──record──▶  data (JSON)  ──embed──▶  o
      two animations on the same leaf.
    Per-leaf timing for `lag_ratio`, `LaggedStart`, `AnimationGroup` follows
    manim's `get_sub_alpha` / `anims_with_timings` exactly.
-2. **Export** (`export.py`). Data + `player.js` inlined into one HTML page. The data is
-   gzipped and base64-encoded (~6x smaller; the browser inflates it with its built-in
-   `DecompressionStream`). `write_html(..., compress=False)` writes plain JSON;
-   `read_html(path)` returns the data from either form.
+2. **Export** (`export.py`). `write_site(data, folder)` writes the folder form
+   (per-step chunks, each state/outline stored in the chunk of the first step that
+   uses it, plus a dependency list per step); `write_html(data, file)` the single
+   gzipped file. `read_html(path)` returns the data from either form.
 3. **Play** (`player.js`). Drawing is a port of manim's Cairo camera
    (`Camera.set_cairo_context_path` + `display_vectorized`): 4 control points per
    cubic, new subpath where a curve doesn't start at the previous end, nonzero
@@ -115,11 +124,12 @@ leaves. Two ways to embed:
 
 | `embed=` | What is embedded | Plays in | Needs |
 | --- | --- | --- | --- |
-| `"frames"` (default) | WebP images, flipped by the player | **every** viewer, incl. VS Code's built-in browser | nothing extra (PyAV comes with manim) |
+| `"frames"` (default) | WebP images, flipped by the player | **every** viewer, incl. VS Code's built-in browser | nothing extra (PyAV comes with manim; Pillow reads GIF / animated WebP / APNG sources) |
 | `"webm"` | VP9 WebM in a muted `<video>` | Chrome, Firefox, Edge — **not** VS Code (its media stack lacks the codecs) | ffmpeg to convert (PATH or `[video]` extra) |
 
 `"frames"` is larger per second (one image per frame), so keep clips short
-(crop + trim). Both are cached in `~/.cache/manim-web-bridge/video/` by source
+(crop + trim). Tip: keep source clips as **animated WebP** (or GIF): unlike
+WebM/MP4 they also open directly in VS Code. Both are cached in `~/.cache/manim-web-bridge/video/` by source
 content + options.
 
 ## Files
