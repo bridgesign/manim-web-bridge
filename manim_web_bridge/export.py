@@ -98,26 +98,148 @@ def _data_url_bytes(url: str) -> tuple[bytes, str]:
     return base64.b64decode(b64), ext
 
 
-def write_site(data: dict, folder, title: str = "Slides") -> Path:
-    """Write the deck as a folder (see module docstring). Returns main.html."""
+def _clip_entry(v: dict) -> dict:
+    """A clip entry in the current form {name, kind, loop, url}; older
+    recordings stored {"anim": url} (animated image) or {"src": url} (video)."""
+    if "kind" in v:
+        return v
+    url = v.get("anim") or v.get("src")
+    kind = "image" if "anim" in v else "video"
+    ext = re.match(r"data:\w+/([\w.+-]+)", url or "")
+    return {"name": f"clip.{ext.group(1) if ext else 'bin'}", "kind": kind, "loop": v.get("loop", False), "url": url}
+
+
+STEP_HEADER = """\
+// {title}
+// Readable on purpose: change a timing (seconds), a position (x, y in frame units; the frame is
+// {fw:g} x {fh:g} with 0, 0 at its centre), a colour ("#rrggbb") or an opacity (0 to 1), save and
+// reload the page. A rebuild from Python writes this file again.
+//
+//   step.cmds  what this click does, in order:
+//                "set"   what is on screen: [object, state] pairs
+//                "play"  T seconds of tracks: k = kind (tween, create, write), u = object,
+//                        a, b = start and end state, t = start time, d = duration, r = rate function
+//                "wait"  d seconds; "frames" = sampled frames, fps per second
+//   step.end   what is on screen when the step is done: [object, state]
+//   states     the looks first used here: g = outline (in geoms; x, y place it), f, fo = fill colour
+//              and opacity, c, co, w = stroke colour, opacity and width; img / vid = image / clip
+//   geoms      outlines: 4 control points per curve, in 1/1000 frame units from the first point
+"""
+
+
+def _j(v) -> str:
+    return json.dumps(v, ensure_ascii=False, separators=(", ", ": "))
+
+
+def _commented(items, indent: str) -> str:
+    """(code, comment) lines joined as a JSON list body, a comment after each."""
+    out = []
+    for i, (code, note) in enumerate(items):
+        comma = "," if i < len(items) - 1 else ""
+        out.append(f"{indent}{code}{comma}" + (f"  // {note}" if note else ""))
+    return "\n".join(out)
+
+
+def _by_name(entries, name_of):
+    """Consecutive entries on the same object share one line."""
+    groups = []
+    for e in entries:
+        n = name_of(e)
+        if groups and groups[-1][1] == n:
+            groups[-1][0].append(e)
+        else:
+            groups.append(([e], n))
+    return [(", ".join(_j(e) for e in es), n) for es, n in groups]
+
+
+def _readable_chunk(k: int, n: int, chunk: dict, names: list, state_names: dict, frame) -> str:
+    """One step as commented JSON, one object per line (see STEP_HEADER)."""
+    name = lambda u: names[u] if u < len(names) else ""
+    step = chunk["step"]
+    title = f"step {k} of {n - 1}" + (f" -- {step['note']}" if step.get("note") else "")
+    cmds = []
+    for cmd in step["cmds"]:
+        if cmd["op"] == "set":
+            body = _commented(_by_name(cmd["d"], lambda p: name(p[0])), "      ")
+            cmds.append((f'{{"op": "set", "d": [\n{body}\n    ]}}', ""))
+        elif cmd["op"] == "play":
+            body = _commented(_by_name(cmd["tr"], lambda tr: name(tr["u"])), "      ")
+            cmds.append((f'{{"op": "play", "T": {_j(cmd["T"])}, "tr": [\n{body}\n    ]}}', ""))
+        else:
+            cmds.append((_j(cmd), ""))
+    flags = "".join(f'  "{key}": {_j(step[key])},\n' for key in ("note", "loop", "auto") if key in step)
+    end = _commented(_by_name(step["end"], lambda p: name(p[0])), "    ")
+    states = _commented([(f'"{i}": {_j(v)}', state_names.get(int(i), "")) for i, v in chunk["states"].items()], "  ")
+    geoms = _commented([(f'"{i}": {_j(v)}', "") for i, v in chunk["geoms"].items()], "  ")
+    return (STEP_HEADER.format(title=title, fw=frame[0], fh=frame[1])
+            + f"__bridgeChunk({k}, {{\n"
+            + f'"build": {_j(chunk["build"])},\n'
+            + '"step": {\n' + flags
+            + '  "cmds": [\n' + _commented(cmds, "    ") + "\n  ],\n"
+            + '  "end": [\n' + end + "\n  ]\n},\n"
+            + '"states": {\n' + states + "\n},\n"
+            + '"geoms": {\n' + geoms + "\n}\n});\n")
+
+
+def _strip_comments(js: str) -> str:
+    """Drop // comments outside strings (the readable step files carry them)."""
+    out = []
+    for line in js.splitlines():
+        in_str = esc = False
+        for i, ch in enumerate(line):
+            if in_str:
+                esc, in_str = (not esc and ch == "\\"), (in_str if esc or ch != '"' else False)
+            elif ch == '"':
+                in_str = True
+            elif ch == "/" and line[i + 1: i + 2] == "/":
+                line = line[:i]
+                break
+        out.append(line)
+    return "\n".join(out)
+
+
+def write_site(data: dict, folder, title: str = "Slides", readable: bool = True) -> Path:
+    """Write the deck as a folder (see module docstring). Returns main.html.
+    readable=True writes each step as commented JSON, one object per line,
+    for people to read and edit; False writes it compact."""
     folder = Path(folder)
-    for sub in ("steps", "media"):              # only the folders this writer owns
-        shutil.rmtree(folder / sub, ignore_errors=True)
-        (folder / sub).mkdir(parents=True)
+    shutil.rmtree(folder / "steps", ignore_errors=True)    # steps/ is the writer's alone
+    (folder / "steps").mkdir(parents=True)
+    media = folder / "media"                                # media/ is shared: files you add stay
+    media.mkdir(parents=True, exist_ok=True)
+    manifest = media / ".bridge-files"                      # what the last export wrote there
+    if manifest.exists():
+        previous = set(json.loads(manifest.read_text()))
+    else:                                                   # an export from before the list existed
+        previous = {p.name for p in media.glob("img_*")} | {p.name for p in media.glob("clip_*")}
+    written, keep = set(), set()
 
     # media -> files; the header keeps only their relative URLs
     images = []
     for i, url in enumerate(data["images"]):
         raw, ext = _data_url_bytes(url)
-        (folder / "media" / f"img_{i}.{ext}").write_bytes(raw)
-        images.append(f"media/img_{i}.{ext}")
+        name = f"img_{i}.{ext}"
+        (media / name).write_bytes(raw)
+        written.add(name)
+        images.append(f"media/{name}")
     videos = []
-    for i, v in enumerate(data.get("videos", [])):
-        url = v.get("anim") or v.get("src")
-        raw, ext = _data_url_bytes(url)
-        (folder / "media" / f"clip_{i}.{ext}").write_bytes(raw)
-        key = "anim" if "anim" in v else "src"
-        videos.append({key: f"media/clip_{i}.{ext}", "loop": v.get("loop", False)})
+    for v in data.get("videos", []):
+        v = _clip_entry(v)
+        name = v["name"]
+        if v["url"] is None:                                # missing at build time: point at media/<name>
+            keep.add(name)
+        else:                                               # the clip under its own name
+            raw, _ = _data_url_bytes(v["url"])
+            stem, suffix = Path(name).stem, Path(name).suffix
+            k = 2
+            while name in written:                          # two different clips, one name
+                name, k = f"{stem}_{k}{suffix}", k + 1
+            (media / name).write_bytes(raw)
+            written.add(name)
+        videos.append({"name": name, "kind": v["kind"], "loop": v["loop"], "url": f"media/{name}"})
+    for old in previous - written - keep:                   # only files this writer made before
+        (media / old).unlink(missing_ok=True)
+    manifest.write_text(json.dumps(sorted(written)))
 
     # every state / outline belongs to the first step that uses it
     states, geoms, steps = data["states"], data["geoms"], data["steps"]
@@ -137,12 +259,25 @@ def write_site(data: dict, folder, title: str = "Slides") -> Path:
         need = {k} | {s_owner[s] for s in r} | {g_owner[states[s]["g"]] for s in r if "g" in states[s]}
         deps.append(sorted(need))
     build = uuid.uuid4().hex[:12]                # ties the steps to this main.html (see player.js)
+    names = data.get("names") or []
+    state_names = {}                             # state -> the object it was first seen on
+    for st in steps:
+        for cmd in st["cmds"]:
+            pairs = cmd.get("d", []) if cmd["op"] == "set" else []
+            pairs += [[tr["u"], tr["a"]] for tr in cmd.get("tr", [])] + [[tr["u"], tr["b"]] for tr in cmd.get("tr", [])]
+            for u, sid in pairs:
+                state_names.setdefault(sid, names[u] if u < len(names) else "")
+        for u, sid in st["end"]:
+            state_names.setdefault(sid, names[u] if u < len(names) else "")
     for k, step in enumerate(steps):
         chunk = {"build": build, "step": step,
                  "states": {s: states[s] for s in range(len(states)) if s_owner[s] == k},
                  "geoms": {g: geoms[g] for g, o in g_owner.items() if o == k}}
-        (folder / "steps" / f"step_{k:03d}.js").write_text(
-            f"__bridgeChunk({k},{json.dumps(chunk, separators=(',', ':'))});\n")
+        if readable:
+            text = _readable_chunk(k, len(steps), chunk, names, state_names, data["frame"])
+        else:
+            text = f"__bridgeChunk({k},{json.dumps(chunk, separators=(',', ':'))});\n"
+        (folder / "steps" / f"step_{k:03d}.js").write_text(text)
 
     head = {"version": 2, "build": build, "frame": data["frame"], "background": data["background"],
             "images": images, "videos": videos, "deps": deps}
@@ -172,7 +307,8 @@ def read_html(path) -> dict:
         states, geoms = {}, {}
         for k in range(len(h["deps"])):
             js = (path.parent / "steps" / f"step_{k:03d}.js").read_text()
-            chunk = json.loads(js[js.index(",") + 1: js.rindex(")")])
+            js = _strip_comments(js)
+            chunk = json.loads(js[js.index(",", js.index("__bridgeChunk(")) + 1: js.rindex(")")])
             states.update({int(i): v for i, v in chunk["states"].items()})
             geoms.update({int(i): v for i, v in chunk["geoms"].items()})
             data["steps"].append(chunk["step"])
@@ -189,7 +325,7 @@ def read_html(path) -> dict:
 # ---------------------------------------------------------------------------
 # One call: record a scene and write it
 # ---------------------------------------------------------------------------
-def export(scene_class, out, title: str | None = None, quiet: bool = False) -> Path:
+def export(scene_class, out, title: str | None = None, quiet: bool = False, readable: bool = True) -> Path:
     """Record `scene_class` (a BridgeScene subclass) and write it to `out`:
     a folder (main.html + steps/ + media/) or, if `out` ends in .html, one
     self-contained file. Returns the page to open.
@@ -212,7 +348,7 @@ def export(scene_class, out, title: str | None = None, quiet: bool = False) -> P
         page = write_html(data, out, title=title)
         size = out.stat().st_size
     else:
-        page = write_site(data, out, title=title)
+        page = write_site(data, out, title=title, readable=readable)
         size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     if not quiet:
         print(f"{page}: {len(data['steps'])} steps, {len(data['states'])} states, "

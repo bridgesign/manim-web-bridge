@@ -20,7 +20,9 @@ description: Turn a manim (Community Edition) scene or slide deck into one self-
    animations up to the next `next_slide()` repeat until that click; `click=False` ends a step without
    waiting (intro flows into a loop). Everything else is plain manim, and the same scene still renders
    with `manim -pql` (BridgeScene is a plain Scene there; VideoMobject plays natively).
-   VideoMobject is an ImageMobject: put it in `Group`, not `VGroup`.
+   VideoMobject is an ImageMobject: put it in `Group`, not `VGroup`. Clips are embedded as they are
+   (MP4 stays MP4); a missing file is a placeholder that plays once dropped into the export's media/.
+   Label steps with `self.note(...)` so people can find them in the readable steps/*.js files.
    Things colliding? `free_range(m, obstacles, axis="y", bounds=...)` gives the (min, max) where `m`
    fits; `place(...)` puts it in the middle of that range (see README).
 2. Export: `SceneName.export("out/")` from Python, or `python -m manim_web_bridge path/to/file.py SceneName out/` (folder: open

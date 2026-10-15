@@ -125,30 +125,43 @@ few bytes, not a new outline.
 
 ```python
 from manim_web_bridge import VideoMobject
-clip = VideoMobject("replay.webp", width=7.0,       # animated WebP / GIF, or a video (MP4, WebM, ...)
-                    crop=(0.30, 0.10, 0.48, 0.65),  # zoom: (x, y, w, h) fractions of the frame
-                    trim=(0.0, 4.0),                # cut: source seconds
-                    speed=0.5, height=720, loop=True)
+clip = VideoMobject("demo.mp4", width=7.0, loop=True)          # embedded AS IT IS: an MP4 stays an MP4
+clip = VideoMobject("replay.webp", width=7.0,
+                    crop=(0.30, 0.10, 0.48, 0.65), trim=(0.0, 4.0), speed=0.5)   # these re-encode
+clip = VideoMobject("later.mp4", width=7.0, aspect=16 / 9)     # not there yet: a placeholder
 self.play(FadeIn(clip)); self.wait(clip.video_seconds)
 ```
 
 An `ImageMobject` in Python showing the clip's first frame (layout, fades and
 moves work as for any image; group it with `Group`, not `VGroup`). Rendered by
 plain manim (`manim -pql ...`), it plays: an updater shows the frame for the
-time the clip has been on screen. Exported, the browser plays it instead (the
-recorder switches that updater off per clip).
+time the clip has been on screen. Exported, the browser plays it instead.
 
-| `embed=` | What is embedded | Plays in | Needs |
-| --- | --- | --- | --- |
-| `"webp"` (default) | ONE animated WebP (or the GIF/WebP source as-is), shown as an `<img>` over the canvas; the browser animates it | every viewer, incl. VS Code's built-in browser | nothing extra (Pillow; PyAV for video sources — both come with manim) |
-| `"webm"` | VP9 WebM in a muted `<video>` drawn into the canvas | Chrome, Firefox, Edge — not VS Code | ffmpeg (PATH or `[video]` extra) |
+- **As it is.** The file goes to `media/` under its own name and is shown over
+  the canvas: an `<img>` for an animated image (GIF, WebP, APNG), a muted
+  `<video>` for a video (MP4, WebM, ...). Whether it plays is the browser's
+  business (VS Code's built-in browser plays no MP4/WebM; an animated WebP
+  plays everywhere).
+- **Re-encoded only when asked to change**: crop / trim / speed / fps /
+  height, or `loop=False` on a GIF/WebP (they loop by their own flag) -> one
+  animated WebP (Pillow; video frames via PyAV); `embed="webm"` -> VP9 WebM
+  (needs ffmpeg). Cached by content + options.
+- **Missing is fine.** A source that does not exist keeps its place (`aspect=`)
+  and the page points at `media/<name>`: drop the file there later and it
+  plays on the next load (a dashed placeholder until then).
+- **`media/` is shared.** An export replaces only the files it wrote itself
+  (listed in `media/.bridge-files`); files you add stay.
 
-Browsers only animate images they actually show, so animated clips are real
-`<img>` elements kept over their image (fades = CSS opacity; a fresh
-element each time the clip comes on screen restarts it). They are drawn above
-the canvas. Keep source clips as animated WebP/GIF: unlike WebM/MP4 they also
-open directly in VS Code. Conversions are cached in
-`~/.cache/manim-web-bridge/video/`.
+## Editing an export by hand
+
+`steps/step_NNN.js` are readable on purpose (`export(..., readable=True)`, the
+default): commented JSON, one object per line, each line marked with what it is
+(`// Text "Scoring: points…"`, `// VideoMobject demo.mp4`) and each file headed
+by its step note (`BridgeScene.note(...)`; the slide template writes "slide N:
+title"), so `grep -l "Scoring" steps/*.js` finds a slide. Change a timing, a
+position (state `x`, `y`), a colour or an opacity, save, reload. Text is drawn
+as outlines, so a typo needs a rebuild; a rebuild also overwrites hand edits.
+`readable=False` writes compact files (about a third smaller).
 
 ## Layout helper (`free_range`, `place`)
 

@@ -15,7 +15,7 @@ camera does (Camera.set_cairo_context_path), so no conversion can drift.
              "w": 4.0}                     # stroke width (manim units)
     image   {"img": i, "x": cx, "y": cy, "iw": width, "ih": height, "o": opacity}
     video   {"vid": i, "x": cx, "y": cy, "iw": width, "ih": height, "o": opacity}
-            (videos: [{"anim": WebP/GIF data URL, "loop"}] or [{"src": WebM data URL, "loop"}])
+            (videos: [{"name", "kind": "image" | "video", "loop", "url": data URL or None}])
 
 The recorder then moves "p" into a shared outline bank (see recorder.py).
 """
@@ -45,6 +45,38 @@ def _hex(color) -> str:
     return color.to_hex()[:7] if color is not None else "#000000"
 
 
+def _short(text: str, n: int = 40) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _own_name(m) -> str | None:
+    """A readable name for objects people recognise: a piece of text, a clip."""
+    from manim import MarkupText, Paragraph, Text
+    from manim.mobject.text.tex_mobject import SingleStringMathTex
+    if hasattr(m, "video_name"):
+        return f"VideoMobject {m.video_name}"
+    if isinstance(m, (Text, MarkupText, Paragraph)) and getattr(m, "original_text", None):
+        return f'{type(m).__name__} "{_short(m.original_text)}"'
+    if isinstance(m, SingleStringMathTex):
+        return f'{type(m).__name__} "{_short(m.tex_string)}"'
+    return None
+
+
+def names(mobject, inherited: str | None = None, out: dict | None = None) -> dict:
+    """id(leaf) -> a readable name for each drawn leaf of `mobject`: the text
+    or clip it belongs to, else its own type (an arrow's tip is "Arrow")."""
+    out = {} if out is None else out
+    own = _own_name(mobject)
+    draws = isinstance(mobject, AbstractImageMobject) or (isinstance(mobject, VMobject) and len(mobject.points) > 0)
+    name = own or inherited or (type(mobject).__name__ if draws else None)
+    if draws:
+        out[id(mobject)] = name
+    for sub in mobject.submobjects:
+        names(sub, name, out)
+    return out
+
+
 def vector_state(m: VMobject) -> dict:
     return {
         "p": np.round(m.points[:, :2], DECIMALS).ravel().tolist(),
@@ -56,22 +88,29 @@ def vector_state(m: VMobject) -> dict:
 
 class ImageBank:
     """Images are stored once (as PNG data URLs) and referenced by index;
-    videos likewise (as MP4 data URLs, in .videos)."""
+    clips likewise (in .videos, see add_video)."""
 
     def __init__(self):
         self.urls, self._index = [], {}
         self.videos, self._video_index = [], {}
 
-    def add_video(self, path: str, loop: bool = False, anim: bool = False) -> int:
-        """A clip: an animated image (`anim`, WebP or GIF; the browser animates
-        it) or a WebM for a <video>."""
-        key = (path, loop, anim)
+    MIME = {"webp": "image/webp", "gif": "image/gif", "png": "image/png", "apng": "image/apng",
+            "jpg": "image/jpeg", "jpeg": "image/jpeg", "webm": "video/webm", "mp4": "video/mp4",
+            "mov": "video/quicktime", "m4v": "video/mp4", "ogv": "video/ogg"}
+
+    def add_video(self, m) -> int:
+        """A VideoMobject's clip, stored once:
+        {"name": file name, "kind": "image" | "video", "loop": bool,
+         "url": data URL of the file, or None if it does not exist (yet)}."""
+        key = (m.video_path or "missing:" + m.video_name, m.video_loop)
         if key not in self._video_index:
             self._video_index[key] = len(self.videos)
-            ext = Path(path).suffix.lower().lstrip(".")
-            mime = {"webp": "image/webp", "gif": "image/gif", "webm": "video/webm"}.get(ext, "video/webm")
-            url = f"data:{mime};base64," + base64.b64encode(Path(path).read_bytes()).decode()
-            self.videos.append({"anim": url, "loop": bool(loop)} if anim else {"src": url, "loop": bool(loop)})
+            url = None
+            if m.video_path:
+                ext = Path(m.video_path).suffix.lower().lstrip(".")
+                mime = self.MIME.get(ext, "application/octet-stream")
+                url = f"data:{mime};base64," + base64.b64encode(Path(m.video_path).read_bytes()).decode()
+            self.videos.append({"name": m.video_name, "kind": m.video_kind, "loop": bool(m.video_loop), "url": url})
         return self._video_index[key]
 
     def add(self, pixels: np.ndarray) -> int:
@@ -104,7 +143,7 @@ def image_state(m: AbstractImageMobject, images: ImageBank) -> dict:
 def video_state(m, images: ImageBank) -> dict:
     cx, cy, _ = m.get_center()
     return {
-        "vid": images.add_video(m.video_path, getattr(m, "video_loop", False), getattr(m, "video_anim", False)),
+        "vid": images.add_video(m),
         "x": round(float(cx), DECIMALS), "y": round(float(cy), DECIMALS),
         "iw": round(float(m.width), DECIMALS), "ih": round(float(m.height), DECIMALS),
         "o": round(float(m.stroke_opacity), 3),      # an ImageMobject: like image_state

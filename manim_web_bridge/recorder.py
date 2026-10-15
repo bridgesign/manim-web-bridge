@@ -46,7 +46,7 @@ from manim.animation.creation import Create, DrawBorderThenFill
 from manim.animation.transform import Transform
 from manim.utils.rate_functions import linear
 
-from .geometry import ImageBank, leaves, state_of
+from .geometry import ImageBank, leaves, names, state_of
 
 FPS = 30
 
@@ -86,6 +86,8 @@ class Recorder:
         self.steps = []                           # finished steps
         self.cmds = []                            # commands of the current step
         self._uids, self._keep = {}, []           # id(mobject) -> uid
+        self._names = []                          # uid -> readable name (for the step files)
+        self._note = None                         # a note for the current step (BridgeScene.note)
         self._shown = None                        # last display list sent
         self._loop = False                        # current step repeats until a click
         self._auto = False                        # current step flows into the next one
@@ -93,11 +95,14 @@ class Recorder:
     # ------------------------------------------------------------------
     # bookkeeping
     # ------------------------------------------------------------------
-    def uid(self, m) -> int:
+    def uid(self, m, name: str | None = None) -> int:
         key = id(m)
         if key not in self._uids:
             self._uids[key] = len(self._uids)
             self._keep.append(m)   # keep alive so id() is never reused
+            self._names.append(name or type(m).__name__)
+        elif name and self._names[self._uids[key]] == type(m).__name__:
+            self._names[self._uids[key]] = name        # a better name, seen later
         return self._uids[key]
 
     def sid(self, m) -> int:
@@ -134,10 +139,11 @@ class Recorder:
         """What is on screen now: [[uid, state], ...] in drawing order."""
         out, seen = [], set()
         for top in self.scene.mobjects:
+            named = names(top)
             for m in leaves(top):
                 if id(m) not in seen:
                     seen.add(id(m))
-                    out.append([self.uid(m), self.sid(m)])
+                    out.append([self.uid(m, named.get(id(m))), self.sid(m)])
         return out
 
     def sync(self, force: bool = False):
@@ -146,6 +152,10 @@ class Recorder:
         if force or d != self._shown:
             self.cmds.append({"op": "set", "d": d})
             self._shown = d
+
+    def note(self, text: str):
+        """A note for the current step, shown in its readable step file."""
+        self._note = text
 
     def end_step(self, loop: bool = False, auto_next: bool = False, click: bool = True):
         """Close the current step (a click). Its end state is stored so the
@@ -159,12 +169,15 @@ class Recorder:
                      straight into the next one"""
         self.sync()
         step = {"cmds": self.cmds, "end": self._shown or []}
+        if self._note:
+            step["note"] = self._note
         if self._loop:
             step["loop"] = True
         if self._auto or not click:
             step["auto"] = True
         self.steps.append(step)
         self.cmds = []
+        self._note = None
         self._loop, self._auto = loop, auto_next
         if loop:
             self.sync(force=True)
@@ -256,6 +269,7 @@ class Recorder:
         tracks = []
         for anim, kind, t0, span in units:
             ms = leaves(anim.mobject)
+            named = names(anim.mobject)
             outline = leaves(anim.outline) if kind == "write" else None
             n, lag = len(ms), anim.lag_ratio
             full = (n - 1) * lag + 1 if n else 1
@@ -267,7 +281,7 @@ class Recorder:
                     a = outline[i]             # DrawBorderThenFill's outline for this leaf
                 # manim's get_sub_alpha: leaf i runs during [i*lag, i*lag + 1] / full
                 tracks.append({
-                    "k": kind, "u": self.uid(m), "a": self.sid(a), "b": self.sid(b),
+                    "k": kind, "u": self.uid(m, named.get(id(m))), "a": self.sid(a), "b": self.sid(b),
                     "t": round(t0 + span * i * lag / full, 4), "d": round(span / full, 4),
                     "r": saved[id(anim)].__name__,
                 })
@@ -323,4 +337,5 @@ class Recorder:
             "images": self.images.urls,
             "videos": self.images.videos,
             "steps": self.steps,
+            "names": self._names,
         }

@@ -91,25 +91,17 @@ function imageEl(i) {
   if (!imageCache[i]) { const im = new Image(); im.onload = () => draw(); im.src = DATA.images[i]; imageCache[i] = im; }
   return imageCache[i];
 }
-// Clips (VideoMobject), created on first use:
-//  * {anim: url}  an animated WebP / GIF. Browsers only animate images they
-//    actually show, so it is a real <img> placed over the canvas at the
-//    clip's rectangle (see syncOverlays); a fresh element each time it
-//    comes on screen restarts it.
-//  * {src: url}   a WebM in a muted <video>, drawn into the canvas.
-const videoCache = [];
-function videoEl(i) {
-  if (!videoCache[i]) videoCache[i] = makeClip(DATA.videos[i]);
-  return videoCache[i];
-}
-function makeClip(entry) {
-  const { src, loop } = typeof entry === "string" ? { src: entry, loop: false } : entry;
-  const v = document.createElement("video");
-  Object.assign(v, { src, loop, muted: true, playsInline: true, preload: "auto" });
-  v.addEventListener("loadeddata", () => draw());
-  return v;
-}
-const isAnim = (look) => look.vid !== undefined && DATA.videos[look.vid].anim !== undefined;
+// Clips (VideoMobject): {name, kind: "image" | "video", loop, url}. Every clip
+// is a real element over the canvas at its rectangle (see syncOverlays): an
+// <img> for an animated image (browsers only animate images they show), a
+// muted <video> for a video, both as the file is (an MP4 stays an MP4). A
+// fresh element each time the clip comes on screen restarts it. A clip whose
+// file is not there (missing at build time and not yet dropped into media/)
+// shows as a dashed placeholder, and is tried again next time it appears.
+const CLIPS = (DATA.videos || []).map((v) =>
+  v.kind ? { ...v, url: v.url || "media/" + v.name }
+  : v.anim !== undefined ? { name: "clip", kind: "image", url: v.anim, loop: !!v.loop }      // older exports
+  : { name: "clip", kind: "video", url: v.src || v, loop: !!v.loop });
 
 const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 const css = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -138,12 +130,10 @@ function tracePath(p) {
 }
 
 function paint(look) {
-  if (look.img !== undefined || look.vid !== undefined) {
-    if (isAnim(look)) return;                          // drawn as an <img> overlay instead
-    const v = look.vid !== undefined ? videoEl(look.vid) : null;
-    const im = v || imageEl(look.img);
-    const ready = v ? v.readyState >= 2 : im.complete;
-    if (!ready || look.o <= 0) return;
+  if (look.vid !== undefined) return;                  // clips are elements over the canvas
+  if (look.img !== undefined) {
+    const im = imageEl(look.img);
+    if (!im.complete || look.o <= 0) return;
     ctx.save();
     ctx.globalAlpha = look.o;
     ctx.translate(look.x, look.y);
@@ -176,30 +166,47 @@ function draw() {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(s, 0, 0, -s, canvas.width / 2, canvas.height / 2);   // manim frame -> pixels
   ctx.lineJoin = "miter"; ctx.lineCap = "butt"; ctx.miterLimit = 10;   // Cairo defaults
-  const visibleVideos = new Set(), overlays = [];
+  const overlays = [];
   for (const u of order) {
     const l = looks.get(u);
     if (!l) continue;
     paint(l);
-    if (isAnim(l)) { if (l.o > 0) overlays.push(l); }
-    else if (l.vid !== undefined && l.o > 0) visibleVideos.add(l.vid);
+    if (l.vid !== undefined && l.o > 0) overlays.push(l);
   }
-  syncVideos(visibleVideos);
   syncOverlays(overlays);
 }
 
-// Animated images: one <img> per visible clip, kept over its rectangle.
-const overlayEls = new Map();            // vid -> <img>
+// One element per visible clip, kept over its rectangle.
+const overlayEls = new Map();            // vid -> container <div>
+
+function makeOverlay(c) {
+  const box = document.createElement("div");
+  Object.assign(box.style, { position: "fixed", pointerEvents: "none", overflow: "hidden", boxSizing: "border-box" });
+  const media = document.createElement(c.kind === "video" ? "video" : "img");
+  if (c.kind === "video") {
+    Object.assign(media, { muted: true, autoplay: true, playsInline: true, loop: c.loop });
+    media.setAttribute("muted", "");                   // autoplay needs the attribute in some browsers
+  }
+  Object.assign(media.style, { width: "100%", height: "100%", objectFit: "fill", display: "block" });
+  media.addEventListener("error", () => {             // not there (yet): a placeholder, not an error
+    media.remove();
+    Object.assign(box.style, { border: "2px dashed #9CA3AF", display: "flex", alignItems: "center",
+                               justifyContent: "center", color: "#6B7280", font: "14px sans-serif" });
+    box.textContent = `${c.url}: not there yet, or a format this browser cannot play`;
+  });
+  media.src = c.url;
+  box.appendChild(media);
+  return box;
+}
+
 function syncOverlays(list) {
   const r = canvas.getBoundingClientRect(), k = r.width / FW;
   const want = new Set(list.map((l) => l.vid));
   for (const [vid, el] of overlayEls) if (!want.has(vid)) { el.remove(); overlayEls.delete(vid); }
   for (const l of list) {
     let el = overlayEls.get(l.vid);
-    if (!el) {                                         // new on screen: a fresh element restarts the animation
-      el = document.createElement("img");
-      el.src = DATA.videos[l.vid].anim;
-      Object.assign(el.style, { position: "fixed", pointerEvents: "none", imageRendering: "auto" });
+    if (!el) {                                         // new on screen: a fresh element restarts the clip
+      el = makeOverlay(CLIPS[l.vid]);
       document.body.appendChild(el);
       overlayEls.set(l.vid, el);
     }
@@ -207,20 +214,6 @@ function syncOverlays(list) {
       left: `${r.left + (l.x - l.iw / 2 + FW / 2) * k}px`, top: `${r.top + (FH / 2 - l.y - l.ih / 2) * k}px`,
       width: `${l.iw * k}px`, height: `${l.ih * k}px`, opacity: String(l.o),
     });
-  }
-}
-
-// A video starts from the beginning when it comes on screen, pauses when it
-// leaves, and keeps the canvas redrawing while it plays.
-let liveVideos = new Set(), videoLoop = false;
-function syncVideos(visible) {
-  for (const i of visible) if (!liveVideos.has(i)) { videoEl(i).currentTime = 0; videoEl(i).play().catch(() => {}); }
-  for (const i of liveVideos) if (!visible.has(i)) videoEl(i).pause();
-  liveVideos = visible;
-  if (liveVideos.size && !videoLoop) {
-    videoLoop = true;
-    const tick = () => { if (!liveVideos.size) { videoLoop = false; return; } draw(); requestAnimationFrame(tick); };
-    requestAnimationFrame(tick);
   }
 }
 
@@ -380,13 +373,18 @@ async function warmMedia(step) {
     if (!st) continue;
     if (st.img !== undefined) jobs.push(imageEl(st.img).decode?.().catch(() => {}));
     else if (st.vid !== undefined) {
-      const entry = DATA.videos[st.vid];
-      if (entry.anim !== undefined && !heldClips[st.vid]) {
+      const c = CLIPS[st.vid];
+      if (heldClips[st.vid]) continue;
+      if (c.kind === "image") {
         const im = new Image();                         // same URL as the overlay <img> -> cached
-        im.src = entry.anim;
+        im.src = c.url;
         heldClips[st.vid] = im;                         // keep it alive so the cache entry stays
-        jobs.push(im.decode?.().catch(() => {}));
-      } else if (entry.anim === undefined) videoEl(st.vid);   // <video preload="auto">
+        jobs.push(im.decode?.().catch(() => {}));       // a missing file is simply skipped
+      } else {
+        const v = document.createElement("video");     // fetch ahead; the overlay plays its own
+        Object.assign(v, { preload: "auto", muted: true, src: c.url });
+        heldClips[st.vid] = v;
+      }
     }
   }
   await Promise.all(jobs);
@@ -488,7 +486,7 @@ canvas.addEventListener("click", next);
 
 // for tests / automation
 window.bridge = { next, prev, jump, preload, run: (i) => runStep(i, true), steps: N_STEPS, get current() { return current; },
-                  get _videos() { return videoCache; }, get _overlays() { return [...overlayEls.values()]; } };
+                  get _overlays() { return [...overlayEls.values()]; } };
 
 resize();
 const fromHash = parseInt(location.hash.slice(1), 10);

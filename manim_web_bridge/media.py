@@ -1,40 +1,36 @@
 """
-VideoMobject: a video placed in the scene like an image.
+VideoMobject: a clip (video or animated image) placed in the scene like an image.
 
     from manim_web_bridge import VideoMobject
 
-    clip = VideoMobject(
-        "replay.webm",
-        width=7.0,                       # size on the slide (frame units)
-        crop=(0.30, 0.10, 0.48, 0.65),   # zoom: (x, y, w, h) as fractions of the source frame
-        trim=(0.0, 4.0),                 # cut: keep source seconds 0-4
-        speed=0.5,                       # play at half speed
-        height=720,                      # output resolution (pixels, default 720p)
-        loop=True,                       # repeat while on screen
-    )
-    self.play(FadeIn(clip))              # fades, moves and scaling work like any shape
+    clip = VideoMobject("demo.mp4", width=7.0, loop=True)       # embedded as it is: MP4 stays MP4
+    clip = VideoMobject("replay.webp", width=7.0,
+                        crop=(0.30, 0.10, 0.48, 0.65),   # zoom: (x, y, w, h) as fractions of the frame
+                        trim=(0.0, 4.0),                 # cut: keep source seconds 0-4
+                        speed=0.5)                       # options like these re-encode it (see below)
+    clip = VideoMobject("later.mp4", width=7.0, aspect=16 / 9)  # not there yet: a placeholder
+    self.play(FadeIn(clip))                     # fades, moves and scaling work like any image
 
 It is an ImageMobject (showing the clip's first frame), so layout, fades and
-moves behave like any image. Exported, the recorder embeds the clip once and
-the player shows it at the image's place; it starts from the beginning when
-it comes on screen. Rendered by manim itself, an updater swaps in the frame
-for the time the clip has been on screen, so the same scene also works as a
-plain manim video.
+moves behave like any image. Exported, the clip is a file in media/ under its
+own name, shown over the canvas at the image's place -- an <img> for an
+animated image (GIF, WebP, APNG), a muted <video> for a video (MP4, WebM,
+...). It starts from the beginning each time it comes on screen. Rendered by
+manim itself, an updater swaps in the frame for the time the clip has been
+on screen, so the same scene is also a plain manim video.
 
-Two ways to embed (`embed=`):
-  "webp" (default)  ONE animated WebP that the browser animates itself
-                    (shown as an <img> over the canvas at the clip's place;
-                    fades are CSS opacity). An animated WebP / GIF source with
-                    no options is embedded as-is; otherwise it is re-encoded
-                    once (Pillow) with the crop / trim / speed / size applied.
-                    Works in every viewer, including VS Code's built-in
-                    browser (images, not video codecs). Video sources (MP4,
-                    WebM, ...) are read with PyAV, which manim already uses.
-  "webm"            a VP9 WebM in a muted <video> (smaller for long clips,
-                    but VS Code cannot play it). Needs ffmpeg (PATH or the
-                    optional `imageio-ffmpeg`).
-Both are cached by source content + options, so rebuilding does not
-re-encode.
+The file is embedded AS IT IS (an MP4 stays an MP4; the viewer's browser has
+to play it -- VS Code's built-in one plays no MP4/WebM, use an animated WebP
+there). It is re-encoded only when asked to change: crop / trim / speed /
+fps / height, or loop=False on a GIF/WebP (they loop forever by their own
+flag). Re-encoding makes ONE animated WebP (Pillow; video frames read with
+PyAV, which manim already uses), or a VP9 WebM with embed="webm" (needs
+ffmpeg). Both are cached by source content + options.
+
+A source that does not exist is not an error: the clip keeps its place
+(aspect= sets its shape, default 16:9) and the export points at
+media/<file name>. Drop the file there later and the page plays it on the
+next load; until then the player shows a dashed placeholder.
 """
 
 import hashlib
@@ -173,6 +169,26 @@ def encode_animated_webp(source: Path, crop=None, trim=None, height=720, speed: 
     return out, meta
 
 
+IMAGE_TYPES = {".gif", ".webp", ".png", ".apng", ".jpg", ".jpeg"}
+
+
+def kind_of(path) -> str:
+    """'image' (shown in an <img>) or 'video' (shown in a <video>)."""
+    return "image" if Path(path).suffix.lower() in IMAGE_TYPES else "video"
+
+
+def _video_meta(path: Path) -> dict:
+    """Width, height and duration of a video, read with PyAV (no ffmpeg needed)."""
+    import av
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        if stream.duration is not None:
+            seconds = float(stream.duration * stream.time_base)
+        else:
+            seconds = (container.duration or 0) / 1_000_000
+        return {"w": stream.codec_context.width, "h": stream.codec_context.height, "seconds": seconds}
+
+
 def _image_meta(path: Path) -> dict:
     from PIL import Image
     with Image.open(path) as im:
@@ -187,10 +203,10 @@ class _NativeFrames:
     """Frames of the embedded clip for native manim rendering, decoded on
     demand (animated image: Pillow; WebM: PyAV, decoded once)."""
 
-    def __init__(self, path: Path, anim: bool):
-        self.path, self.anim = Path(path), anim
+    def __init__(self, path: Path, kind: str):
+        self.path = Path(path)
         self.starts, self._frames, self._im, self._last = [], None, None, None
-        if anim:
+        if kind == "image":
             from PIL import Image
             self._im = Image.open(self.path)
             t = 0.0
@@ -201,7 +217,7 @@ class _NativeFrames:
             self.seconds = t
         else:
             self._frames = [img for _, img in _source_frames(self.path) if img is not None]
-            fps = len(self._frames) / max(1e-6, probe(self.path)["seconds"])
+            fps = len(self._frames) / max(1e-6, _video_meta(self.path)["seconds"])
             self.starts = [k / fps for k in range(len(self._frames))]
             self.seconds = len(self._frames) / fps
 
@@ -225,47 +241,51 @@ class _NativeFrames:
 
 
 class VideoMobject(ImageMobject):
-    """A video clip on the slide; see the module docstring for the options."""
+    """A clip on the slide; see the module docstring for the options."""
 
-    def __init__(self, source, width: float = 8.0, *, crop=None, trim=None, height: int = 720,
+    def __init__(self, source, width: float = 8.0, *, crop=None, trim=None, height=None,
                  fps=None, speed: float = 1.0, loop: bool = False, crf: int = 34,
-                 embed: str = "webp", quality: int = 80, **kwargs):
+                 embed: str = "auto", quality: int = 80, aspect: float = 16 / 9, **kwargs):
+        if embed not in ("auto", "webp", "webm"):
+            raise ValueError(f"embed must be 'auto', 'webp' or 'webm', not {embed!r}")
         source = Path(source)
         self.video_loop = loop
-        if embed == "webp":
-            # an animated image is embedded as-is unless it must change; a clip that
-            # should play once (loop=False) is re-encoded, as GIFs usually loop forever
-            untouched = (source.suffix.lower() in (".webp", ".gif") and not (crop or trim or speed != 1.0)
-                         and loop and (height is None or _image_meta(source)["h"] <= height))
-            if untouched:                                    # already an animated image: embed as-is
-                path, meta = source.resolve(), _image_meta(source)
-            else:
-                path, meta = encode_animated_webp(source, crop, trim, height, speed, loop, quality)
-            self.video_anim = True
-        elif embed == "webm":
-            meta = None
-            if source.suffix.lower() == ".webm" and not (crop or trim or fps or speed != 1.0):
-                meta = probe(source)                         # a WebM that is already small enough
-                if height is not None and meta["h"] > height:
-                    meta = None                              # ... or needs scaling down
-            if meta is not None:
-                path = source.resolve()
-            else:
-                path, meta = encode_webm(source, crop, trim, height, fps, speed, crf)
-            self.video_anim = False
+        self.video_name = source.name                # its file name in the export's media/
+        self.video_missing = not source.exists()
+        if self.video_missing:                       # added later: keep the place, point at media/<name>
+            path, meta, kind = None, {"w": 1600, "h": round(1600 / aspect), "seconds": 0.0}, kind_of(source)
         else:
-            raise ValueError(f"embed must be 'webp' or 'webm', not {embed!r}")
-        self.video_path = str(path)
+            kind = kind_of(source)
+            meta = _image_meta(source) if kind == "image" else _video_meta(source)
+            change = bool(crop or trim or fps or speed != 1.0 or (height and height != meta["h"]))
+            if kind == "image" and not loop:
+                change = True                         # GIF/WebP loop by their own flag: re-encode to play once
+            if embed == "webm":
+                path, meta = encode_webm(source, crop, trim, height or 720, fps, speed, crf)
+                kind = "video"
+            elif change or embed == "webp":
+                path, meta = encode_animated_webp(source, crop, trim, height, speed, loop, quality)
+                kind = "image"
+                self.video_name = Path(source).stem + ".webp"
+            else:
+                path = source.resolve()               # as it is: an MP4 stays an MP4
+        self.video_kind = kind
+        self.video_path = str(path) if path else None
         self.video_seconds = meta["seconds"]          # handy for deck.wait(...)
 
-        self._native = _NativeFrames(path, self.video_anim)
-        super().__init__(self._native.rgba(0), **kwargs)
+        if path:
+            self._native = _NativeFrames(path, kind)
+            first = self._native.rgba(0)
+        else:
+            self._native = None                       # placeholder: a plain grey frame of the aspect
+            first = np.full((90, max(1, round(90 * aspect)), 4), (200, 200, 200, 255), dtype=np.uint8)
+        super().__init__(first, **kwargs)
         self.scale_to_fit_width(width)
         self._clock = 0.0
         self.native_playback = True   # the recorder turns this off: the browser plays the clip
 
         def advance(m, dt):           # native manim only: show the frame for the time on screen
-            if not m.native_playback or dt <= 0:
+            if not m.native_playback or dt <= 0 or m._native is None:
                 return
             m._clock += dt          # (re-set every tick: a running fade rewrites the pixels)
             m.set_frame(m._native.index_at(m._clock, m.video_loop))

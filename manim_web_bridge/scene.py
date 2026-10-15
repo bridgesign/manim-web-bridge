@@ -50,12 +50,18 @@ class BridgeScene(Scene):
         if self.recorder is not None:
             self.recorder.end_step(loop=loop, auto_next=auto_next, click=click)
 
+    def note(self, text: str):
+        """Label the current step (e.g. "slide 12: Scoring"); it heads that
+        step's file in the export, so a person can find it. No-op natively."""
+        if self.recorder is not None:
+            self.recorder.note(text)
+
     @classmethod
-    def export(cls, out, title: str | None = None, quiet: bool = False):
+    def export(cls, out, title: str | None = None, quiet: bool = False, readable: bool = True):
         """Record this scene and write it to `out` (a folder, or a .html file).
         Returns the page to open. See export.export."""
         from .export import export
-        return export(cls, out, title=title, quiet=quiet)
+        return export(cls, out, title=title, quiet=quiet, readable=readable)
 
     def record(self) -> dict:
         """Run the scene and return the recorded data (instead of render())."""
