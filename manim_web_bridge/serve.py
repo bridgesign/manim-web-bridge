@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import sysconfig
@@ -119,7 +120,16 @@ def worker_plan(deck: Path, name: str, cls=None) -> dict:
     """The slide list and, for each slide, the files its code comes from."""
     import inspect
     cls = cls or load_scene_class(deck, name)
-    base = module_closure(sys.modules[cls.__module__])                 # the deck and what it imports
+    # what every slide runs besides its own code: the deck file itself and the
+    # scene class's base classes (the template, the bridge) with what they import
+    # -- not the deck's other slides, which it imports too
+    deck_module = sys.modules[cls.__module__]
+    base = {str(Path(deck_module.__file__).resolve())}
+    for c in cls.__mro__:
+        mod = sys.modules.get(c.__module__)
+        if mod is not None and mod is not deck_module:
+            module_closure(mod, base)
+    everything = module_closure(deck_module)                           # for watching: the deck and all it imports
     bridge = {str(p.resolve()) for p in HERE.glob("*.py")}
     slides = []
     for i, fn in enumerate(cls.slides):
@@ -132,7 +142,7 @@ def worker_plan(deck: Path, name: str, cls=None) -> dict:
         # a slide runs its own module's code AND the scene class's (the deck, the
         # template, the bridge), so all of them count
         slides.append({"index": i, "key": slide_key(fn), "code": sorted(files | base | bridge), **where})
-    return {"slides": slides, "deck_files": sorted(base | bridge),
+    return {"slides": slides, "deck_files": sorted(everything | bridge),
             "quick": bool(getattr(cls, "quick", False))}
 
 
@@ -498,6 +508,134 @@ def lint(path: Path, start: int, end: int, code: str) -> list:
     return out
 
 
+# -- inserting code: slide functions in sections ------------------------------
+SECTIONS = ("Objects", "Groups", "Transitions")
+MARKER = re.compile(r"^\s*## (Objects|Groups|Transitions)\b")
+
+
+def _function(tree, name):
+    import ast
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    raise LookupError(f"no function {name}()")
+
+
+def function_end(lines: list, fn) -> int:
+    """The function's last line (1-based), counting the comment lines after
+    its last statement that still belong to it (indented like its body) --
+    ast stops at the last statement, which would leave the sections out."""
+    indent = " " * fn.body[0].col_offset
+    end = fn.end_lineno
+    i = end
+    while i < len(lines) and (not lines[i].strip() or lines[i].startswith(indent)):
+        i += 1
+        if lines[i - 1].strip():
+            end = i
+    return end
+
+
+def ensure_sections(text: str, function: str) -> str:
+    """Give the slide function its `## Objects / ## Groups / ## Transitions`
+    comment sections (appended at its end, in that order, if missing)."""
+    import ast
+    lines = text.split("\n")
+    fn = _function(ast.parse(text), function)
+    end = function_end(lines, fn)
+    have = {m.group(1) for ln in lines[fn.lineno - 1:end] if (m := MARKER.match(ln))}
+    missing = [s for s in SECTIONS if s not in have]
+    if not missing:
+        return text
+    indent = " " * fn.body[0].col_offset
+    add = [""] + [f"{indent}## {s}" for s in missing]
+    return "\n".join(lines[:end] + add + lines[end:])
+
+
+def insert_into_section(text: str, function: str, section: str, code: list) -> str:
+    """Add `code` lines at the end of `section` of the slide function."""
+    import ast
+    text = ensure_sections(text, function)
+    lines = text.split("\n")
+    fn = _function(ast.parse(text), function)
+    end = function_end(lines, fn)
+    body = range(fn.lineno - 1, end)                              # 0-based line indexes of the function
+    marks = {MARKER.match(lines[i]).group(1): i for i in body if MARKER.match(lines[i])}
+    start = marks[section]
+    stop = min([i for i in marks.values() if i > start] + [end])
+    last = max([i for i in range(start, stop) if lines[i].strip()] + [start])   # after the section's last line
+    indent = " " * fn.body[0].col_offset
+    return "\n".join(lines[:last + 1] + [indent + c for c in code] + lines[last + 1:])
+
+
+def ensure_imports(text: str, module: str, names: list) -> str:
+    """`from module import ...` for the names the file does not have yet."""
+    import ast
+    tree = ast.parse(text)
+    have = {a.asname or a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    missing = sorted(set(names) - have)
+    if not missing:
+        return text
+    lines = text.split("\n")
+    same = [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == module and n.lineno == n.end_lineno
+            and not any(a.asname for a in n.names)]
+    if same:                                                    # extend `from module import a, b` in place
+        n = same[0]
+        merged = sorted({a.name for a in n.names} | set(missing), key=lambda x: (not x.isupper(), x))
+        lines[n.lineno - 1] = f"from {module} import {', '.join(merged)}"
+        return "\n".join(lines)
+    imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    at = imports[-1].end_lineno if imports else 0
+    return "\n".join(lines[:at] + [f"from {module} import {', '.join(missing)}"] + lines[at:])
+
+
+def statement_name(text: str, line: int) -> str | None:
+    """The variable the statement at `line` assigns (`name = ...`), if any."""
+    import ast
+    best = None
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.lineno <= line <= node.end_lineno:
+            if best is None or node.lineno >= best.lineno:
+                best = node
+    if best is None:
+        return None
+    targets = best.targets if isinstance(best, ast.Assign) else [best.target]
+    return targets[0].id if len(targets) == 1 and isinstance(targets[0], ast.Name) else None
+
+
+def fresh_name(text: str, function: str, stem: str) -> str:
+    import ast
+    used = {n.id for n in ast.walk(_function(ast.parse(text), function)) if isinstance(n, ast.Name)}
+    k = 1
+    while f"{stem}_{k}" in used:
+        k += 1
+    return f"{stem}_{k}"
+
+
+def ink_for(background: str) -> str:
+    """A colour that shows on `background` (manim's shapes default to white or red)."""
+    r, g, b = (int(background.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    return "#1F1F1F" if 0.299 * r + 0.587 * g + 0.114 * b > 140 else "#FFFFFF"
+
+
+def object_code(kind: str, var: str, cv: str, fx: float, fy: float, value: str = "", ink: str = "#1F1F1F") -> tuple:
+    """(code lines for ## Objects, the transition line, manim names to import),
+    every size and position a fraction of the canvas; shapes drawn in `ink`."""
+    at = f"{cv}.point({fx:.3f}, {fy:.3f})"
+    if kind == "text":
+        return [f"{var} = Text({value or 'Text'!r}, font_size={cv}.font(0.04)).move_to({at})"], f"FadeIn({var})", ["FadeIn", "Text"]
+    if kind == "equation":
+        return [f"{var} = MathTex(r{(value or 'x^2')!r}, font_size={cv}.font(0.05)).move_to({at})"], f"Write({var})", ["MathTex", "Write"]
+    if kind == "box":
+        return [f"{var} = RoundedRectangle(width={cv}.w(0.2), height={cv}.h(0.12), corner_radius={cv}.h(0.02), color='{ink}').move_to({at})"], f"FadeIn({var})", ["FadeIn", "RoundedRectangle"]
+    if kind == "circle":
+        return [f"{var} = Circle(radius={cv}.h(0.06), color='{ink}').move_to({at})"], f"FadeIn({var})", ["Circle", "FadeIn"]
+    if kind == "arrow":
+        return [f"{var} = Arrow({at}, {cv}.point({min(fx + 0.12, 0.98):.3f}, {fy:.3f}), buff=0, color='{ink}')"], f"GrowArrow({var})", ["Arrow", "GrowArrow"]
+    if kind == "image":
+        return [f"{var} = ImageMobject({value!r}).set_width({cv}.w(0.3)).move_to({at})"], f"FadeIn({var})", ["FadeIn", "ImageMobject"]
+    raise ValueError(f"unknown kind {kind!r}")
+
+
 # ---------------------------------------------------------------------------
 # watching files
 # ---------------------------------------------------------------------------
@@ -661,10 +799,68 @@ def make_handler(deck: Deck):
             except (KeyError, LookupError, PermissionError, SyntaxError, ValueError) as e:
                 return self.json({"error": str(e)}, 400)
 
+        def group_info(self, uids: list) -> dict:
+            """The variables that hold the selected items, in the slide's own file."""
+            d = deck.deck
+            names, unnamed, images, slides = [], [], False, set()
+            for u in uids:
+                if not 0 <= u < len(d["names"]):
+                    continue
+                slide = deck.seg_slides[d["owners"][u]]
+                slides.add(d["owners"][u])
+                images |= d["names"][u].startswith(("ImageMobject", "VideoMobject"))
+                here = [(f, n) for f, n in (d["sources"][u] or []) if f == slide.get("file")]
+                var = statement_name(Path(here[-1][0]).read_text(), here[-1][1]) if here else None
+                if var and var not in names:
+                    names.append(var)
+                elif not var and d["names"][u] not in unnamed:
+                    unnamed.append(d["names"][u])
+            return {"names": names, "unnamed": unnamed, "type": "Group" if images else "VGroup",
+                    "slides": sorted(slides)}
+
+        def insert(self, body: dict):
+            """Add an object (kind + where, as fractions) or a group to the slide on screen."""
+            import ast
+            slide = deck.seg_slides[int(body["slide"])]
+            f = self.deck_file(str(Path(slide["file"]).relative_to(deck.path.parent)))
+            fn_name, text = slide["function"], f.read_text()
+            fn = _function(ast.parse(text), fn_name)
+            scene = fn.args.args[0].arg if fn.args.args else "self"
+            assigned = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+            if body["kind"] == "group":
+                kind = "Group" if body.get("type") == "Group" else "VGroup"
+                var = fresh_name(text, fn_name, "group")
+                text = insert_into_section(text, fn_name, "Groups", [f"{var} = {kind}({', '.join(body['names'])})"])
+                text = ensure_imports(text, "manim", [kind])
+            else:
+                cv = "cv" if "cv" in assigned else None
+                pre = [] if cv else ["cv = Canvas()   # positions and sizes below are fractions of the canvas"]
+                var = fresh_name(text, fn_name, body["kind"])
+                code, anim, needs = object_code(body["kind"], var, "cv", float(body["fx"]), float(body["fy"]),
+                                                body.get("value", ""), ink_for(deck.deck["background"]))
+                text = insert_into_section(text, fn_name, "Objects", pre + code)
+                text = insert_into_section(text, fn_name, "Transitions", [f"{scene}.play({anim})"])
+                text = ensure_imports(text, "manim", needs)
+                if not cv:
+                    text = ensure_imports(text, "manim_web_bridge", ["Canvas"])
+            compile(text, str(f), "exec")                               # never write code that does not parse
+            tmp = f.with_suffix(".py.bridge-tmp")
+            tmp.write_text(text)
+            tmp.replace(f)
+            deck.log(f"inserted from the page: {var} into {f.name}:{fn_name}()")
+            return self.json({"ok": True, "name": var, "file": str(f.relative_to(deck.path.parent))})
+
         def do_POST(self):
             url = urlparse(self.path)
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                if url.path == "/api/group":
+                    return self.json(self.group_info([int(u) for u in body["uids"]]))
+                if url.path == "/api/insert":
+                    return self.insert(body)
+            except (KeyError, ValueError, LookupError, PermissionError, SyntaxError) as e:
+                return self.json({"error": str(e)}, 400)
+            try:
                 f = self.deck_file(body["file"])
                 start, end, code = int(body["start"]), int(body["end"]), body["code"]
             except (KeyError, ValueError, PermissionError) as e:

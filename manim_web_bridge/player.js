@@ -231,6 +231,21 @@ function drawHighlight() {
   ctx.strokeRect(x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad);
   ctx.restore();
 }
+// Page point -> frame coordinates, and the visible objects a page rectangle touches.
+function toFrame(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  return [((clientX - r.left) / r.width - 0.5) * FW, (0.5 - (clientY - r.top) / r.height) * FH];
+}
+function uidsIn(cx0, cy0, cx1, cy1) {
+  const [ax, ay] = toFrame(Math.min(cx0, cx1), Math.max(cy0, cy1)), [bx, by] = toFrame(Math.max(cx0, cx1), Math.min(cy0, cy1));
+  return order.filter((u) => {
+    const l = looks.get(u);
+    if (!l || (l.pts && (!l.pts.length || (l.fo <= 0.05 && (l.co <= 0.05 || l.w <= 0))))) return false;
+    if ((l.img !== undefined || l.vid !== undefined) && l.o <= 0.05) return false;
+    const b = bounds(l);
+    return b[0] <= bx && b[2] >= ax && b[1] <= by && b[3] >= ay;
+  });
+}
 // The object drawn at a point of the page (topmost first), or null.
 function hitTest(clientX, clientY) {
   const r = canvas.getBoundingClientRect(), k = canvas.width / r.width;
@@ -574,7 +589,9 @@ canvas.addEventListener("click", () => { if (!window.bridge.editing) next(); });
 window.bridge = { next, prev, jump, preload, run: (i) => runStep(i, true), get steps() { return N_STEPS; }, get current() { return current; },
                   get _overlays() { return [...overlayEls.values()]; },
                   // editing (editor.js): what is under a point, outline a selection, which slide is shown
-                  editing: false, hitTest, canvas,
+                  editing: false, hitTest, uidsIn, canvas,
+                  // a page point as fractions of the canvas: (0, 0) top-left, (1, 1) bottom-right
+                  fraction(clientX, clientY) { const r = canvas.getBoundingClientRect(); return [(clientX - r.left) / r.width, (clientY - r.top) / r.height]; },
                   highlight(uids) { highlighted = uids || []; draw(); },
                   get slide() { return DATA.slides ? DATA.slides[current] : null; } };
 

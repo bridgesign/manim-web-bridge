@@ -153,7 +153,28 @@ whole function, in a code editor (CodeMirror 5, Python, checked as you type:
 syntax errors, plus pyflakes' warnings with the `[editor]` extra). Ctrl/Cmd+S
 saves (only code that parses, only files inside the deck's folder, and not
 if the file changed since it was opened); the server records that slide
-again and the page follows. Where objects were made is recorded by the
+again and the page follows.
+
+**Adding and grouping.** In edit mode, **right-click** adds an object where
+you clicked (Text, Equation, Box, Circle, Arrow, Image; positions and sizes
+as canvas fractions, shapes in a colour that shows on the background), and
+**dragging** a rectangle selects everything in it: the variables that hold
+those items in the slide's code are listed and can be grouped
+(`group_N = VGroup(...)`, or `Group` when images are involved). Added code
+goes into the slide function's comment sections, created if missing:
+
+```python
+def show(deck):
+    ...                     # the slide as it was
+    ## Objects             # what is made
+    text_1 = Text("Hello", font_size=cv.font(0.04)).move_to(cv.point(0.3, 0.72))
+    ## Groups              # VGroup(...) of selected objects
+    group_1 = VGroup(text_1, box_1)
+    ## Transitions         # how each comes on screen
+    deck.play(FadeIn(text_1))
+```
+
+Missing imports are added to the existing `from manim import ...` line. Where objects were made is recorded by the
 workers (a hook on `Mobject.__init__`); text and clips speak for their parts.
 
 ## Layout in fractions (`Canvas`)

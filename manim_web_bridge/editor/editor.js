@@ -3,9 +3,16 @@
 //
 //   E            edit mode on / off (a click then selects instead of advancing)
 //   click        select the object under the pointer: its name, where it was made
+//   right-click  add an object there (text, equation, box, circle, arrow, image)
+//   drag         select everything in a rectangle -> group it (VGroup)
 //   "this item"  the statement that made it (in the slide, or in a helper)
 //   "the slide"  the whole slide function
 //   Ctrl/Cmd+S   save (only if it parses); Esc closes
+//
+// Added code goes into the slide function's sections (created if missing):
+//   ## Objects       what is made (positions and sizes as canvas fractions)
+//   ## Groups        VGroup(...) of selected objects
+//   ## Transitions   how each object comes on screen
 //
 // Saving writes the file; the server notices, records that slide again and
 // the page reloads it in place. Code is checked as you type (/api/lint:
@@ -39,6 +46,12 @@ css.textContent = `
 .bw-modal .CodeMirror { flex: 1; border: 1px solid #D1D5DB; height: auto; }
 .bw-modal .status { color: #6B7280; font-size: 0.85em; min-height: 1.3em; }
 .bw-modal .status.bad { color: #B42318; }
+.bw-menu { position: fixed; z-index: 25; background: #fff; display: none; font-family: sans-serif;
+           box-shadow: 0 0.3em 1.2em rgba(0,0,0,0.25); }
+.bw-menu div { cursor: pointer; } .bw-menu div:hover { background: #F3F4F6; }
+.bw-menu .title { color: #6B7280; cursor: default; } .bw-menu .title:hover { background: none; }
+.bw-rubber { position: fixed; z-index: 15; border-style: dashed; border-color: #C69214;
+             background: rgba(198, 146, 20, 0.08); pointer-events: none; display: none; }
 `;
 document.head.appendChild(css);
 
@@ -50,7 +63,9 @@ const modal = Object.assign(document.createElement("div"), { className: "bw-moda
 modal.innerHTML = `<div class="head"><b class="title"></b><span class="file"></span></div>
   <textarea></textarea><div class="status"></div>
   <div><button class="primary save">Save (Ctrl+S)</button><button class="cancel">Cancel (Esc)</button></div>`;
-document.body.append(pill, panel, shade, modal);
+const menu = Object.assign(document.createElement("div"), { className: "bw-menu" });
+const rubber = Object.assign(document.createElement("div"), { className: "bw-rubber" });
+document.body.append(pill, panel, shade, modal, menu, rubber);
 
 function layout() {                                   // everything sized from the canvas
   const r = canvas.getBoundingClientRect(), h = r.height;
@@ -60,6 +75,8 @@ function layout() {                                   // everything sized from t
   Object.assign(modal.style, { left: `${r.left + 0.04 * r.width}px`, top: `${r.top + 0.05 * h}px`,
                                width: `${0.92 * r.width}px`, height: `${0.9 * h}px`, fontSize: px(0.024),
                                padding: px(0.02), borderRadius: px(0.012), gap: px(0.01) });
+  Object.assign(menu.style, { fontSize: px(0.024), borderRadius: px(0.01), padding: `${0.006 * h}px 0` });
+  rubber.style.borderWidth = `${Math.max(1, 0.003 * h)}px`;
   if (editor) { editor.getWrapperElement().style.fontSize = px(0.024); editor.refresh(); }
 }
 addEventListener("resize", layout);
@@ -81,7 +98,8 @@ addEventListener("keydown", (e) => {
 });
 
 canvas.addEventListener("click", async (e) => {
-  if (!bridge.editing) return;
+  if (!bridge.editing || justDragged) { justDragged = false; return; }
+  menu.style.display = "none";
   const uid = bridge.hitTest(e.clientX, e.clientY);
   if (uid === null) { panel.style.display = "none"; bridge.highlight([]); return; }
   info = await (await fetch(`/api/object/${uid}`)).json();
@@ -170,5 +188,72 @@ function close() { shade.style.display = "none"; modal.style.display = "none"; t
 modal.querySelector(".save").addEventListener("click", save);
 modal.querySelector(".cancel").addEventListener("click", close);
 shade.addEventListener("click", close);
+
+
+// -- right-click: add an object where you clicked -----------------------------------------
+const KINDS = [["text", "Text", "the text"], ["equation", "Equation (LaTeX)", "the LaTeX"], ["box", "Box"],
+               ["circle", "Circle"], ["arrow", "Arrow"], ["image", "Image", "the image file (path)"]];
+canvas.addEventListener("contextmenu", (e) => {
+  if (!bridge.editing || bridge.slide === null) return;
+  e.preventDefault();
+  const [fx, fy] = bridge.fraction(e.clientX, e.clientY);
+  const pad = `${0.006 * unit()}px ${0.018 * unit()}px`;
+  menu.innerHTML = `<div class="title" style="padding:${pad}">add at (${fx.toFixed(2)}, ${fy.toFixed(2)})</div>`
+    + KINDS.map(([k, label]) => `<div data-kind="${k}" style="padding:${pad}">${label}</div>`).join("");
+  menu.style.display = "block";
+  menu.style.left = `${e.clientX}px`; menu.style.top = `${e.clientY}px`;
+  menu.querySelectorAll("[data-kind]").forEach((item) => item.addEventListener("click", async () => {
+    menu.style.display = "none";
+    const [kind, , ask] = KINDS.find(([k]) => k === item.dataset.kind);
+    const value = ask ? prompt(`New ${kind}: ${ask}`) : "";
+    if (ask && !value) return;
+    const r = await (await fetch("/api/insert", { method: "POST",
+      body: JSON.stringify({ slide: bridge.slide, kind, fx, fy, value }) })).json();
+    if (r.error) alert(r.error);                        // otherwise: the slide is recorded again, the page follows
+  }));
+});
+addEventListener("click", (e) => { if (!menu.contains(e.target)) menu.style.display = "none"; }, true);
+
+// -- drag: select a rectangle, group what is in it -------------------------------------------
+let drag = null, justDragged = false;
+canvas.addEventListener("mousedown", (e) => {
+  if (!bridge.editing || e.button !== 0) return;
+  drag = { x: e.clientX, y: e.clientY, moved: false };
+});
+addEventListener("mousemove", (e) => {
+  if (!drag) return;
+  const w = Math.abs(e.clientX - drag.x), h = Math.abs(e.clientY - drag.y);
+  if (!drag.moved && Math.max(w, h) < 0.015 * unit()) return;   // a click, not a drag
+  drag.moved = true;
+  Object.assign(rubber.style, { display: "block", left: `${Math.min(e.clientX, drag.x)}px`, top: `${Math.min(e.clientY, drag.y)}px`,
+                                width: `${w}px`, height: `${h}px` });
+});
+addEventListener("mouseup", async (e) => {
+  if (!drag) return;
+  const d = drag; drag = null; rubber.style.display = "none";
+  if (!d.moved) return;
+  justDragged = true;                                   // the click that follows is not a selection
+  const uids = bridge.uidsIn(d.x, d.y, e.clientX, e.clientY);
+  if (!uids.length) { bridge.highlight([]); panel.style.display = "none"; return; }
+  bridge.highlight(uids);
+  const g = await (await fetch("/api/group", { method: "POST", body: JSON.stringify({ uids }) })).json();
+  if (g.error) return;
+  panel.innerHTML = `<h3>${uids.length} parts selected</h3>`
+    + `<div class="where">variables: ${g.names.length ? g.names.map(esc).join(", ") : "none"}</div>`
+    + (g.unnamed.length ? `<div class="where">not in a variable of this slide: ${g.unnamed.slice(0, 4).map(esc).join("; ")}${g.unnamed.length > 4 ? " ..." : ""}</div>` : "")
+    + (g.slides.length > 1 ? `<div class="where">(more than one slide)</div>` : "")
+    + (g.names.length >= 2 ? `<button class="primary group">Group as ${g.type}(${g.names.map(esc).join(", ")})</button>` : "")
+    + `<button class="close">Close</button>`;
+  panel.querySelector(".group")?.addEventListener("click", async () => {
+    const r = await (await fetch("/api/insert", { method: "POST",
+      body: JSON.stringify({ slide: bridge.slide, kind: "group", names: g.names, type: g.type }) })).json();
+    if (r.error) alert(r.error); else { panel.style.display = "none"; bridge.highlight([]); }
+  });
+  panel.querySelector(".close").addEventListener("click", () => { panel.style.display = "none"; bridge.highlight([]); });
+  panel.style.display = "block";
+  const r = canvas.getBoundingClientRect();
+  panel.style.left = `${Math.min(e.clientX + 0.02 * r.height, r.right - panel.offsetWidth - 0.01 * r.height)}px`;
+  panel.style.top = `${Math.min(e.clientY + 0.02 * r.height, r.bottom - panel.offsetHeight - 0.01 * r.height)}px`;
+});
 
 layout();
