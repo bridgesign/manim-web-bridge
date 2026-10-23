@@ -50,6 +50,32 @@ def _short(text: str, n: int = 40) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def _tex_text(tex: str) -> str:
+    """LaTeX -> roughly its visible text, for names: the part after an
+    \\item[...] label (bullet lists), formatting commands dropped."""
+    import re
+    i = tex.find("\\item[")
+    if i >= 0:                                          # skip the item's [label], brackets balanced
+        depth, j = 0, i + 5
+        while j < len(tex):
+            depth += {"[": 1, "]": -1}.get(tex[j], 0)
+            j += 1
+            if depth == 0:
+                break
+        tex = tex[j:]
+    tex = re.sub(r"\\(begin|end)\{[^}]*\}(\{[^}]*\})?", " ", tex)
+    tex = re.sub(r"\\setlength\{[^}]*\}\{[^}]*\}", " ", tex)
+    for _ in range(3):                                  # \textbf{x}, \emph{x}, \text{x} -> x
+        tex = re.sub(r"\\[a-zA-Z]+\{([^{}]*)\}", r"\1", tex)
+    words = ("alpha|beta|gamma|delta|epsilon|lambda|mu|pi|phi|psi|sigma|theta|omega|Phi|Sigma|Delta|"
+             "tanh|sinh|cosh|sin|cos|log|exp|max|min|sum|top")
+    tex = re.sub(r"\\(" + words + r")\b", r"\1", tex)      # \phi -> phi, \max -> max
+    tex = re.sub(r"\\[a-zA-Z]+", " ", tex)                    # other commands: dropped
+    tex = re.sub(r"\\[,;:! ]", " ", tex)                      # spacing: \, \; \: \!
+    tex = re.sub(r"\s+", " ", tex)
+    return tex.replace("$", "").replace("{", "").replace("}", "")
+
+
 def _own_name(m) -> str | None:
     """A readable name for objects people recognise: a piece of text, a clip."""
     from manim import MarkupText, Paragraph, Text
@@ -59,7 +85,8 @@ def _own_name(m) -> str | None:
     if isinstance(m, (Text, MarkupText, Paragraph)) and getattr(m, "original_text", None):
         return f'{type(m).__name__} "{_short(m.original_text)}"'
     if isinstance(m, SingleStringMathTex):
-        return f'{type(m).__name__} "{_short(m.tex_string)}"'
+        kind = "Tex" if type(m).__name__ in ("Tex", "SingleStringMathTex") and "\\item" in m.tex_string else type(m).__name__
+        return f'{kind} "{_short(_tex_text(m.tex_string))}"'
     return None
 
 
@@ -77,6 +104,21 @@ def names(mobject, inherited: str | None = None, out: dict | None = None) -> dic
     return out
 
 
+def sources(mobject, inherited=None, out: dict | None = None) -> dict:
+    """id(leaf) -> where it was made ([[file, line], ...], see serve.track_sources):
+    a piece of text or a clip speaks for all its parts (manim reuses glyphs
+    between texts, so a glyph's own record may point elsewhere)."""
+    out = {} if out is None else out
+    own = mobject.__dict__.get("_bridge_src")
+    src = inherited or (own if _own_name(mobject) else None)
+    draws = isinstance(mobject, AbstractImageMobject) or (isinstance(mobject, VMobject) and len(mobject.points) > 0)
+    if draws:
+        out[id(mobject)] = src or own
+    for sub in mobject.submobjects:
+        sources(sub, src, out)
+    return out
+
+
 def vector_state(m: VMobject) -> dict:
     return {
         "p": np.round(m.points[:, :2], DECIMALS).ravel().tolist(),
@@ -90,7 +132,8 @@ class ImageBank:
     """Images are stored once (as PNG data URLs) and referenced by index;
     clips likewise (in .videos, see add_video)."""
 
-    def __init__(self):
+    def __init__(self, inline_media: bool = True):
+        self.inline_media = inline_media
         self.urls, self._index = [], {}
         self.videos, self._video_index = [], {}
 
@@ -106,7 +149,9 @@ class ImageBank:
         if key not in self._video_index:
             self._video_index[key] = len(self.videos)
             url = None
-            if m.video_path:
+            if m.video_path and not self.inline_media:
+                url = "file:" + str(Path(m.video_path).resolve())   # served from where it is
+            elif m.video_path:
                 ext = Path(m.video_path).suffix.lower().lstrip(".")
                 mime = self.MIME.get(ext, "application/octet-stream")
                 url = f"data:{mime};base64," + base64.b64encode(Path(m.video_path).read_bytes()).decode()

@@ -13,9 +13,14 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 
-async def main(page_path: Path, out: Path, width: int, only=None, film=None, every=0.25, count=12):
-    if page_path.is_dir():                 # a deck folder: open its main.html
-        page_path = page_path / "main.html"
+async def main(page_path, out: Path, width: int, only=None, film=None, every=0.25, count=12):
+    if str(page_path).startswith(("http://", "https://")):
+        url = str(page_path)               # a served deck (manim_web_bridge.serve)
+    else:
+        page_path = Path(page_path)
+        if page_path.is_dir():             # a deck folder: open its main.html
+            page_path = page_path / "main.html"
+        url = page_path.resolve().as_uri()
     out.mkdir(parents=True, exist_ok=True)
     errors = []
     async with async_playwright() as p:
@@ -28,7 +33,7 @@ async def main(page_path: Path, out: Path, width: int, only=None, film=None, eve
             # film 0: load without a hash (step 0 autoplays); film n: jump to the
             # end of step n-1, then play step n
             hash_ = "" if film == 0 else f"#{film - 1 if film is not None else 0}"
-            await page.goto(page_path.resolve().as_uri() + hash_)
+            await page.goto(url + hash_)
             await page.wait_for_function("window.bridge", timeout=60000)
             if film:
                 await page.wait_for_timeout(300)
@@ -46,7 +51,7 @@ async def main(page_path: Path, out: Path, width: int, only=None, film=None, eve
             for e in dict.fromkeys(errors):
                 print(e[:300])
             return
-        await page.goto(page_path.resolve().as_uri())
+        await page.goto(url)
         await page.wait_for_function("window.bridge && window.__bridgeIdle === true", timeout=60000)
         steps = await page.evaluate("window.bridge.steps")
         for i in range(steps):
@@ -61,7 +66,7 @@ async def main(page_path: Path, out: Path, width: int, only=None, film=None, eve
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("page", type=Path)
+    ap.add_argument("page", help="a deck folder, its main.html, or an http:// URL of a served deck")
     ap.add_argument("out", type=Path)
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--steps", help="comma-separated step indices to capture (end states)")

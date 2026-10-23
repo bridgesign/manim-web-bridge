@@ -20,6 +20,7 @@ classifiers = [
 [project.optional-dependencies]
 test = ["playwright"]
 video = ["imageio-ffmpeg"]   # ffmpeg for VideoMobject(embed="webm"), if not on PATH
+editor = ["pyflakes"]        # warnings (not just syntax errors) in the served editor
 
 [project.scripts]
 manim-web-bridge = "manim_web_bridge.__main__:main"
@@ -31,4 +32,4 @@ Repository = "https://github.com/bridgesign/manim-web-bridge"
 packages = ["manim_web_bridge"]
 
 [tool.setuptools.package-data]
-manim_web_bridge = ["player.js"]
+manim_web_bridge = ["player.js", "editor/*.js", "editor/vendor/*"]

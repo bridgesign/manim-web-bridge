@@ -121,6 +121,57 @@ rate function), `frames` (`{u: [[uid, state]...], o?: [uids]}` per frame),
 `wait`. Outlines and states are deduplicated, so moving/fading a shape costs a
 few bytes, not a new outline.
 
+## Live server: per-slide recording, hot reload, editing in the page
+
+```bash
+python -m manim_web_bridge.serve path/to/deck.py FullUpdate     # then open http://localhost:8000
+```
+
+The scene lists its slides (`slides = [show_title, show_results, ...]`,
+`construct` just calls them in order; see `BridgeScene`). The server records
+**each slide on its own**, in worker processes (fresh imports, `--workers N`
+at once), and caches it in `<deck dir>/.bridge-cache/` with what it depended
+on: its module and everything it imports from your own code (editable
+packages included; Python's and site-packages' are not), the scene class's
+own code, and every file it **opened** while recording (an audit hook). Edit
+any of them and only the slides that depend on it are recorded again; the
+open page is told (Server-Sent Events), fetches the new deck and stays on the
+slide you are on. `player.js` changes reload the page. A slide that fails
+keeps its last good version and its traceback is shown over the page.
+
+Nothing is written next to the deck but the cache: page, steps and media are
+served (clips from where they are; a missing clip from `<deck dir>/media/`,
+a placeholder until it is there). Slides recorded apart do not see each
+other's objects, so the player fades the previous slide out at each slide
+boundary, keeping what is identical on both sides (a footer) on screen.
+
+**Editing in the page.** Press **E** (or the "edit" pill): a click now
+selects the object under the pointer, outlines it and says what it is and
+where it was made (`file:line`, including the helper that made it). **Edit
+this item** opens the statement that made it, **Edit the slide** the slide's
+whole function, in a code editor (CodeMirror 5, Python, checked as you type:
+syntax errors, plus pyflakes' warnings with the `[editor]` extra). Ctrl/Cmd+S
+saves (only code that parses, only files inside the deck's folder, and not
+if the file changed since it was opened); the server records that slide
+again and the page follows. Where objects were made is recorded by the
+workers (a hook on `Mobject.__init__`); text and clips speak for their parts.
+
+## Layout in fractions (`Canvas`)
+
+```python
+from manim_web_bridge import Canvas
+c = Canvas()                              # the frame, read from manim's config
+title.move_to(c.point(0.5, 0.1))          # (0, 0) top-left, (1, 1) bottom-right
+box.set_width(c.w(0.8)); label.next_to(box, DOWN, buff=c.h(0.02))
+Text("Hi", font_size=c.font(0.04))        # capital letters 4% of the canvas height
+body = c.region(0.04, 0.15, 0.96, 0.9)    # a sub-canvas: fractions inside it
+```
+
+No absolute numbers: positions, lengths, fonts (`font`, calibrated on the
+reference font's capital letter) and strokes (`stroke`) are fractions of the
+canvas, so a layout looks the same on any frame size. Every helper has an
+inverse (`fx`, `fy`, `fw`, `fh`, `ffont`) for tools that store what they see.
+
 ## Video clips (`VideoMobject`)
 
 ```python
@@ -184,6 +235,9 @@ assert overlaps([diagram], [header, notes], padding=0.15) == []
 | File | What |
 | --- | --- |
 | `manim_web_bridge/scene.py` | `BridgeScene` — subclass this instead of `Scene` |
+| `manim_web_bridge/serve.py` | the live server: per-slide workers, cache, watcher, hot reload, the editor's API |
+| `manim_web_bridge/editor/` | the in-page editor (`editor.js`) and CodeMirror 5 (vendored, MIT) |
+| `manim_web_bridge/canvas.py` | `Canvas`: layout in fractions of the canvas |
 | `manim_web_bridge/layout.py` | `free_range` / `place` / `overlaps`: free space along an axis (bounding boxes) |
 | `manim_web_bridge/recorder.py` | records `play`/`wait`/`next_slide` into steps |
 | `manim_web_bridge/geometry.py` | mobject → state (points, style, images) |
@@ -235,3 +289,6 @@ Delete screenshot folders afterwards.
 ## License
 
 Apache-2.0 (see `LICENSE`).
+
+The editor bundles [CodeMirror 5](https://codemirror.net/5/) (5.65.16, MIT
+licence, (c) Marijn Haverbeke and others) in `manim_web_bridge/editor/vendor/`.

@@ -25,7 +25,10 @@ description: Turn a manim (Community Edition) scene or slide deck into one self-
    Label steps with `self.note(...)` so people can find them in the readable steps/*.js files.
    Things colliding? `free_range(m, obstacles, axis="y", bounds=...)` gives the (min, max) where `m`
    fits; `place(...)` puts it in the middle of that range (see README).
-2. Export: `SceneName.export("out/")` from Python, or `python -m manim_web_bridge path/to/file.py SceneName out/` (folder: open
+2. Working on a deck: `python -m manim_web_bridge.serve deck.py SceneName` (scene lists `slides`):
+   per-slide recording, cache, hot reload; E in the page edits the code behind any object.
+   Lay out with `Canvas` fractions (`c.point`, `c.w`, `c.h`, `c.font`), never absolute numbers.
+   Export: `SceneName.export("out/")` from Python, or `python -m manim_web_bridge path/to/file.py SceneName out/` (folder: open
    `out/main.html`; steps load on demand) or `... out.html` (one self-contained file).
    The file's folder is put on `sys.path`, so decks can import sibling modules.
 3. The CLI prints steps, number of states and file size. Several MB is fine.

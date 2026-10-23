@@ -46,7 +46,7 @@ from manim.animation.creation import Create, DrawBorderThenFill
 from manim.animation.transform import Transform
 from manim.utils.rate_functions import linear
 
-from .geometry import ImageBank, leaves, names, state_of
+from .geometry import ImageBank, leaves, names, sources, state_of
 
 FPS = 30
 
@@ -77,16 +77,17 @@ def _has_updaters(scene) -> bool:
 
 
 class Recorder:
-    def __init__(self, scene):
+    def __init__(self, scene, inline_media: bool = True):
         self.scene = scene
         self.states, self._state_index = [], {}   # deduplicated states
         self.geoms, self._geom_index = [], {}     # deduplicated outlines
         self._memo = {}                           # fingerprint -> state index
-        self.images = ImageBank()
+        self.images = ImageBank(inline_media)   # inline_media=False: clips by path (the server serves them)
         self.steps = []                           # finished steps
         self.cmds = []                            # commands of the current step
         self._uids, self._keep = {}, []           # id(mobject) -> uid
         self._names = []                          # uid -> readable name (for the step files)
+        self._sources = []                        # uid -> [[file, line], ...] where it was made (serve's editor)
         self._note = None                         # a note for the current step (BridgeScene.note)
         self._shown = None                        # last display list sent
         self._loop = False                        # current step repeats until a click
@@ -95,12 +96,13 @@ class Recorder:
     # ------------------------------------------------------------------
     # bookkeeping
     # ------------------------------------------------------------------
-    def uid(self, m, name: str | None = None) -> int:
+    def uid(self, m, name: str | None = None, source=None) -> int:
         key = id(m)
         if key not in self._uids:
             self._uids[key] = len(self._uids)
             self._keep.append(m)   # keep alive so id() is never reused
             self._names.append(name or type(m).__name__)
+            self._sources.append(source if source is not None else m.__dict__.get("_bridge_src"))
         elif name and self._names[self._uids[key]] == type(m).__name__:
             self._names[self._uids[key]] = name        # a better name, seen later
         return self._uids[key]
@@ -139,11 +141,11 @@ class Recorder:
         """What is on screen now: [[uid, state], ...] in drawing order."""
         out, seen = [], set()
         for top in self.scene.mobjects:
-            named = names(top)
+            named, made = names(top), sources(top)
             for m in leaves(top):
                 if id(m) not in seen:
                     seen.add(id(m))
-                    out.append([self.uid(m, named.get(id(m))), self.sid(m)])
+                    out.append([self.uid(m, named.get(id(m)), made.get(id(m))), self.sid(m)])
         return out
 
     def sync(self, force: bool = False):
@@ -269,7 +271,7 @@ class Recorder:
         tracks = []
         for anim, kind, t0, span in units:
             ms = leaves(anim.mobject)
-            named = names(anim.mobject)
+            named, made = names(anim.mobject), sources(anim.mobject)
             outline = leaves(anim.outline) if kind == "write" else None
             n, lag = len(ms), anim.lag_ratio
             full = (n - 1) * lag + 1 if n else 1
@@ -281,7 +283,7 @@ class Recorder:
                     a = outline[i]             # DrawBorderThenFill's outline for this leaf
                 # manim's get_sub_alpha: leaf i runs during [i*lag, i*lag + 1] / full
                 tracks.append({
-                    "k": kind, "u": self.uid(m, named.get(id(m))), "a": self.sid(a), "b": self.sid(b),
+                    "k": kind, "u": self.uid(m, named.get(id(m)), made.get(id(m))), "a": self.sid(a), "b": self.sid(b),
                     "t": round(t0 + span * i * lag / full, 4), "d": round(span / full, 4),
                     "r": saved[id(anim)].__name__,
                 })
@@ -338,4 +340,5 @@ class Recorder:
             "videos": self.images.videos,
             "steps": self.steps,
             "names": self._names,
+            "sources": self._sources,
         }

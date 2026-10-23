@@ -27,6 +27,10 @@ from .recorder import Recorder
 
 class BridgeScene(Scene):
     recorder = None          # set by record(); None = plain manim rendering
+    #: Optional: the scene as a list of slides, each a callable taking the scene
+    #: (construct() should just call them in order). The server (serve.py)
+    #: records them one at a time, so editing one slide re-records only it.
+    slides: list = []
 
     def play(self, *animations, **kwargs):
         if self.recorder is None:
@@ -50,6 +54,11 @@ class BridgeScene(Scene):
         if self.recorder is not None:
             self.recorder.end_step(loop=loop, auto_next=auto_next, click=click)
 
+    def step_is_empty(self) -> bool:
+        """True if nothing has been played since the last click (so ending the
+        step now would add a click that does nothing)."""
+        return self.recorder is None or not any(c["op"] != "set" for c in self.recorder.cmds)
+
     def note(self, text: str):
         """Label the current step (e.g. "slide 12: Scoring"); it heads that
         step's file in the export, so a person can find it. No-op natively."""
@@ -62,6 +71,27 @@ class BridgeScene(Scene):
         Returns the page to open. See export.export."""
         from .export import export
         return export(cls, out, title=title, quiet=quiet, readable=readable)
+
+    # -- per-slide recording (see serve.py) ---------------------------------
+    def begin_slide(self, index: int, numbered_before: int) -> None:
+        """Hook: about to record slides[index] on its own, after
+        `numbered_before` numbered slides. Override to continue numbering."""
+
+    def numbered_slides(self) -> int:
+        """Hook: how many numbered slides this scene has made so far."""
+        return 0
+
+    def record_slide(self, index: int, numbered_before: int = 0, inline_media: bool = True) -> dict:
+        """Record slides[index] alone: setup, the slide, tear_down. The data
+        also says how many numbered slides it made ("numbered")."""
+        self.recorder = Recorder(self, inline_media=inline_media)
+        self.setup()
+        self.begin_slide(index, numbered_before)
+        type(self).slides[index](self)
+        self.tear_down()
+        data = self.recorder.data()
+        data["numbered"] = self.numbered_slides() - numbered_before
+        return data
 
     def record(self) -> dict:
         """Run the scene and return the recorded data (instead of render())."""
