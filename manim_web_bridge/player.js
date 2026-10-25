@@ -34,17 +34,32 @@ let N_STEPS = DATA.steps.length;
 const SERVER = !!DATA.server;                 // served by manim_web_bridge.serve: fetch steps, hot reload
 
 // Chunk k (folder form) calls __bridgeChunk(k, {step, states, geoms}).
-const chunkWaiters = new Map(), chunkLoads = new Map();
+const chunkWaiters = new Map(), chunkFailed = new Map(), chunkLoads = new Map();
 // A rebuild while the page is open replaces main.html and every step file;
 // a step from another build (or a missing one) means the page is stale, so
 // reload it once, at the same step (the URL hash), instead of mixing builds.
-function reloadStale() {
-  const key = "bridge-reloaded-" + DATA.build;
-  try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, "1"); } catch (e) {}
-  location.reload();
+function reloadStale(newBuild) {
+  // reload once, past the browser's cache (a cached main.html would come back
+  // stale and every step would be refused again); if even that did not help,
+  // say so on the page instead of waiting forever
+  const key = "bridge-reloaded-" + DATA.build + "-" + (newBuild || "");
+  let tried = false;
+  try { tried = !!sessionStorage.getItem(key); sessionStorage.setItem(key, "1"); } catch (e) {}
+  if (!tried) {
+    const url = new URL(location.href);
+    url.searchParams.set("v", newBuild || Date.now().toString(36));
+    location.replace(url.toString());
+  } else {
+    showNotice("These slides were exported again while this page was open, and the browser keeps " +
+               "showing the old page. Reload it without the cache (Ctrl+Shift+R / Cmd+Shift+R).");
+  }
 }
 window.__bridgeChunk = (k, c) => {
-  if (DATA.build && c.build && c.build !== DATA.build) { SERVER ? hotReload() : reloadStale(); return; }
+  if (DATA.build && c.build && c.build !== DATA.build) {
+    chunkFailed.get(k)?.(new Error("step " + k + " is from another export"));   // never leave a click waiting
+    SERVER ? hotReload() : reloadStale(c.build);
+    return;
+  }
   for (const i in c.states) DATA.states[i] = c.states[i];
   for (const i in c.geoms) DATA.geoms[i] = c.geoms[i];
   DATA.steps[k] = c.step;
@@ -59,9 +74,10 @@ function loadChunk(k) {
   if (!chunkLoads.has(k)) {
     chunkLoads.set(k, new Promise((resolve, reject) => {
       chunkWaiters.set(k, resolve);
+      chunkFailed.set(k, (e) => { chunkLoads.delete(k); reject(e); });
       const s = document.createElement("script");      // <script>, not fetch(): works from file://
       s.src = `steps/step_${String(k).padStart(3, "0")}.js` + (DATA.build ? `?b=${DATA.build}` : "");
-      s.onerror = () => { reloadStale(); reject(new Error("cannot load " + s.src)); };
+      s.onerror = () => { chunkLoads.delete(k); reject(new Error("cannot load " + s.src)); reloadStale(); };
       document.head.appendChild(s);
     }));
   }
@@ -453,8 +469,10 @@ async function wait(cmd, t0 = now()) {
 // the browser is idle and never blocks playback; an "auto" step pulls in the
 // step it flows into as well.
 const preloaded = new Set(), heldClips = [];
-const idle = () => new Promise((r) => (window.requestIdleCallback ? requestIdleCallback(() => r(), { timeout: 500 })
-                                                                 : setTimeout(r, 50)));
+// idle time; `gentle`: only real idle time (never in the middle of an animation),
+// otherwise at most half a second later
+const idle = (gentle = false) => new Promise((r) => (window.requestIdleCallback
+  ? requestIdleCallback(() => r(), gentle ? {} : { timeout: 500 }) : setTimeout(r, gentle ? 400 : 50)));
 
 function statesOf(step) {
   const ids = new Set(step.end.map(([, s]) => s));
@@ -490,10 +508,10 @@ async function warmMedia(step) {
   await Promise.all(jobs);
 }
 
-async function preload(k) {
+async function preload(k, gentle = false) {
   for (; k < N_STEPS && !preloaded.has(k); k++) {
     preloaded.add(k);
-    await idle();
+    await idle(gentle);
     try {
       await ensureStep(k);
       await warmMedia(DATA.steps[k]);
@@ -524,7 +542,7 @@ async function jump(i) {
 async function runStep(i, once = false) {
   history.replaceState(null, "", "#" + i);           // first, so a stale-page reload lands here
   await ensureStep(i);
-  preload(i + 1);                                    // background, while this step plays
+  preload(i + 1, true);                              // in idle moments while this step plays
   if (DATA.steps[i].first && i > 0 && current === i - 1) startGhosts();   // a new slide begins
   current = i;
   history.replaceState(null, "", "#" + i);
@@ -534,7 +552,8 @@ async function runStep(i, once = false) {
     // step clock: command k starts at (pass start + durations of 0..k-1), so the
     // frame-rounding of each command never adds up (clips stay in sync over a pass)
     let due = now();
-    for (const cmd of step.cmds) {
+    for (const [ci, cmd] of step.cmds.entries()) {
+      runningAt = ci;
       if (cmd.op === "set") { setDisplay(cmd.d); draw(); continue; }
       if (cmd.op === "play") await play(cmd, due);
       else if (cmd.op === "frames") await frames(cmd, due);
@@ -546,6 +565,7 @@ async function runStep(i, once = false) {
   } while (step.loop && !cancel && !once);
   await jump(i);                                     // land exactly on the recorded end state
   window.__bridgeIdle = true;
+  preload(i + 1).then(() => preload(i + 2));         // the step is done: get the next two ready
 }
 
 let chain = true;                                    // false: stop following "auto" steps
@@ -562,12 +582,17 @@ function start(i) {
   })().finally(() => { running = null; });
 }
 
+// Is only waiting left in the running step (nothing more will move)?
+let runningAt = 0;
+const onlyWaitsLeft = () => DATA.steps[current].cmds.slice(runningAt).every((c) => c.op === "wait" || c.op === "set");
+
 async function next() {
   if (running) {                                     // first click finishes the step ...
+    const moveOn = DATA.steps[current].loop || onlyWaitsLeft();
     cancel = true;
-    if (!DATA.steps[current].loop) return;           // (an "auto" chain then carries on)
-    chain = false; await running;                    // ... a looping one moves straight on
-  }
+    if (!moveOn) return;                             // (an "auto" chain then carries on)
+    chain = false; await running;                    // ... a looping one, or one that is only
+  }                                                  //     waiting now, moves straight on
   if (current + 1 < N_STEPS) start(current + 1);
 }
 
