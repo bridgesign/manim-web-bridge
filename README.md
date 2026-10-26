@@ -51,7 +51,11 @@ straight on), e.g. a slide's intro running into a looping animation;
 
 Keys in the page: → / Space / PageDown / click = next (a first press finishes a
 running step; on a looping step it moves straight on), ← / PageUp = previous, Home / End, `f` = fullscreen.
-`out.html#12` opens directly at the end of step 12.
+The address opens a place directly, and the page keeps it up to date as you click (so a reload stays put):
+`main.html#12` is slide 12 and `main.html#12.2` two clicks into it, when the deck labels where its slides start
+with `self.note("slide 12: Scoring", slide_number=12)` (slide_templates does this for every `new_slide`).
+In a deck without slide numbers, `#12` is step 12. Changing the address on an open page jumps there; clicking on
+continues from that point.
 
 ## Dependencies
 

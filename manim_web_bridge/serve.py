@@ -432,7 +432,8 @@ class Deck:
         return {"version": 2, "server": True, "build": self.build, "frame": d["frame"], "background": d["background"],
                 "images": self.head_images, "videos": self.head_videos,
                 "deps": [[k] for k in range(len(d["steps"]))],
-                "slides": [s["slide"] for s in d["steps"]], "notes": [s.get("note", "") for s in d["steps"]]}
+                "slides": [s["slide"] for s in d["steps"]], "notes": [s.get("note", "") for s in d["steps"]],
+                "numbers": [s.get("number") for s in d["steps"]]}
 
     def watched_files(self) -> set:
         files = set(self.plan.get("deck_files", []))

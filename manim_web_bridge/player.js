@@ -11,7 +11,10 @@
 //
 //   next: ArrowRight, Space, PageDown, Enter, click   (finishes a running step first)
 //   prev: ArrowLeft, PageUp, Backspace                (jumps to the previous step's end)
-//   Home / End, F = fullscreen. The URL hash (#12) shows step 12 directly.
+//   Home / End, F = fullscreen. The URL hash opens a place directly: #12 is
+//   slide 12 and #12.2 two clicks into it (decks whose steps carry slide
+//   numbers, see BridgeScene.note), else #12 is step 12. Changing the hash
+//   on an open page goes there too.
 
 // Two page forms (see export.py):
 //  * folder (main.html): a small header (#bridge-head) + one script per step,
@@ -528,25 +531,54 @@ async function preload(k, gentle = false) {
 // ---------------------------------------------------------------------------
 let current = -1, running = null;
 
+// The address of a step: "#<slide>" for a slide's first step, "#<slide>.<clicks>"
+// further in ("#0.<k>" before the first numbered slide); plain "#<step>" in a
+// deck without slide numbers.
+function numbers() {
+  if (DATA.numbers) return DATA.numbers;
+  if (DATA.steps.every(Boolean) && DATA.steps.some((s) => s.number != null)) return DATA.steps.map((s) => s.number ?? null);
+  return null;                                       // (single-file pages have every step at hand)
+}
+function hashOf(k) {
+  const nums = numbers();
+  if (!nums) return "#" + k;
+  let j = k;
+  while (j >= 0 && nums[j] == null) j--;
+  return j < 0 ? `#0.${k}` : k === j ? `#${nums[j]}` : `#${nums[j]}.${k - j}`;
+}
+function stepOf(hash) {                              // the step an address speaks of, or null
+  const m = /^#(\d+)(?:\.(\d+))?$/.exec(hash);
+  if (!m) return null;
+  const nums = numbers(), n = Number(m[1]), off = Number(m[2] || 0);
+  if (!nums) return Math.min(n, N_STEPS - 1);
+  let first = n === 0 ? 0 : nums.findIndex((x) => x != null && x >= n);   // a missing number: the next slide
+  if (first < 0) return N_STEPS - 1;                 // past the last slide: the end
+  let last = first;                                  // stay within that slide
+  while (last + 1 < N_STEPS && nums[last + 1] == null) last++;
+  return Math.min(first + off, last);
+}
+
 async function jump(i) {
   const k = Math.max(0, Math.min(N_STEPS - 1, i));
-  history.replaceState(null, "", "#" + k);           // first, so a stale-page reload lands here
+  history.replaceState(null, "", hashOf(k));         // first, so a stale-page reload lands here
   await ensureStep(k);
   current = k;
   setDisplay(DATA.steps[current].end);
   draw();
-  history.replaceState(null, "", "#" + current);
+  history.replaceState(null, "", hashOf(current));
   preload(current + 1);
 }
 
 async function runStep(i, once = false) {
-  history.replaceState(null, "", "#" + i);           // first, so a stale-page reload lands here
+  playing = -1;                                      // loading: a press now counts as a step forward
+  history.replaceState(null, "", hashOf(i));         // first, so a stale-page reload lands here
   await ensureStep(i);
   preload(i + 1, true);                              // in idle moments while this step plays
   if (DATA.steps[i].first && i > 0 && current === i - 1) startGhosts();   // a new slide begins
   current = i;
-  history.replaceState(null, "", "#" + i);
-  cancel = false;
+  history.replaceState(null, "", hashOf(i));
+  cancel = pending > 0;                              // pressed on while it loaded: just land on its end
+  playing = i;
   const step = DATA.steps[i];
   do {                                               // a loop step repeats until a click
     // step clock: command k starts at (pass start + durations of 0..k-1), so the
@@ -583,16 +615,38 @@ function start(i) {
 }
 
 // Is only waiting left in the running step (nothing more will move)?
-let runningAt = 0;
+let runningAt = 0, playing = -1;                     // playing: the step whose commands are running
 const onlyWaitsLeft = () => DATA.steps[current].cmds.slice(runningAt).every((c) => c.op === "wait" || c.op === "set");
 
+// Presses that arrive while a step still runs are counted, never dropped: a lone
+// press finishes the step; presses in quick succession (and any after that first
+// one) are steps forward. When the running step has stopped, the steps pressed
+// past are not animated -- the page lands on the end of the one before the last
+// and plays only the last.
+let pending = 0, waiting = false;                    // waiting: presses are being applied
+let lastPress = -Infinity;
 async function next() {
-  if (running) {                                     // first click finishes the step ...
-    const moveOn = DATA.steps[current].loop || onlyWaitsLeft();
-    cancel = true;
-    if (!moveOn) return;                             // (an "auto" chain then carries on)
-    chain = false; await running;                    // ... a looping one, or one that is only
-  }                                                  //     waiting now, moves straight on
+  const rapid = now() - lastPress < 0.4;             // pressing quickly: every press is a step forward
+  lastPress = now();
+  if (running || waiting) {
+    const animating = running && !waiting && playing === current && !cancel;
+    if (animating && !rapid && !(DATA.steps[current].loop || onlyWaitsLeft())) { cancel = true; return; }   // (an "auto" chain then carries on)
+    cancel = true; chain = false;                    // finishing, still loading, looping or only waiting: move on
+    pending++;
+    if (waiting) return;                             // the press already waiting takes this one along
+    waiting = true;
+    try {
+      try { await running; } catch (e) {}
+      let target = current;
+      while (pending > 0) {                          // presses keep arriving while we land: add them up
+        target = Math.min(target + pending, N_STEPS - 1);
+        pending = 0;
+        if (target - 1 > current) await jump(target - 1);
+      }
+      if (target > current) start(target);
+    } finally { waiting = false; }
+    return;
+  }
   if (current + 1 < N_STEPS) start(current + 1);
 }
 
@@ -691,6 +745,14 @@ if (SERVER) {
 dispatchEvent(new Event("bridge-ready"));             // for add-ons such as the editor
 
 resize();
-const fromHash = parseInt(location.hash.slice(1), 10);
-if (Number.isInteger(fromHash)) { await jump(fromHash); window.__bridgeIdle = true; }
+// a new address typed on the open page: go there (stop what is playing first)
+addEventListener("hashchange", async () => {
+  const k = stepOf(location.hash);
+  if (k === null || k === current) return;
+  if (running) { chain = false; cancel = true; await running; }
+  await jump(k);
+});
+
+const fromHash = stepOf(location.hash);
+if (fromHash !== null) { await jump(fromHash); window.__bridgeIdle = true; }
 else start(0);

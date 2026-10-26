@@ -89,6 +89,7 @@ class Recorder:
         self._names = []                          # uid -> readable name (for the step files)
         self._sources = []                        # uid -> [[file, line], ...] where it was made (serve's editor)
         self._note = None                         # a note for the current step (BridgeScene.note)
+        self._number = None                       # the slide number the current step begins, if any
         self._shown = None                        # last display list sent
         self._loop = False                        # current step repeats until a click
         self._auto = False                        # current step flows into the next one
@@ -155,9 +156,13 @@ class Recorder:
             self.cmds.append({"op": "set", "d": d})
             self._shown = d
 
-    def note(self, text: str):
-        """A note for the current step, shown in its readable step file."""
+    def note(self, text: str, slide_number: int | None = None):
+        """A note for the current step, shown in its readable step file;
+        `slide_number`: this step begins the slide the audience knows by
+        that number (the page's address can then say #<number>)."""
         self._note = text
+        if slide_number is not None:
+            self._number = int(slide_number)
 
     def end_step(self, loop: bool = False, auto_next: bool = False, click: bool = True):
         """Close the current step (a click). Its end state is stored so the
@@ -173,13 +178,15 @@ class Recorder:
         step = {"cmds": self.cmds, "end": self._shown or []}
         if self._note:
             step["note"] = self._note
+        if self._number is not None:
+            step["number"] = self._number
         if self._loop:
             step["loop"] = True
         if self._auto or not click:
             step["auto"] = True
         self.steps.append(step)
         self.cmds = []
-        self._note = None
+        self._note = self._number = None
         self._loop, self._auto = loop, auto_next
         if loop:
             self.sync(force=True)

@@ -29,13 +29,14 @@ async def main(page_path, out: Path, width: int, only=None, film=None, every=0.2
         page.on("console", lambda m: m.type in ("error", "warning") and errors.append(f"{m.type}: {m.text}"))
         page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
         if only is not None or film is not None:
-            # "#n" jumps to the end of step n without playing anything
+            # a hash opens a place without playing anything ("#0" is the start; other
+            # numbers may name slides, so steps are reached with bridge.jump)
             # film 0: load without a hash (step 0 autoplays); film n: jump to the
             # end of step n-1, then play step n
-            hash_ = "" if film == 0 else f"#{film - 1 if film is not None else 0}"
-            await page.goto(url + hash_)
-            await page.wait_for_function("window.bridge", timeout=60000)
+            await page.goto(url + ("" if film == 0 else "#0"))
+            await page.wait_for_function("window.bridge && window.bridge.current >= 0", timeout=60000)
             if film:
+                await page.evaluate(f"window.bridge.jump({film - 1})")
                 await page.wait_for_timeout(300)
                 await page.evaluate("window.bridge.next()")
             if film is not None:

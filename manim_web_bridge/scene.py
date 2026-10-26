@@ -59,11 +59,14 @@ class BridgeScene(Scene):
         step now would add a click that does nothing)."""
         return self.recorder is None or not any(c["op"] != "set" for c in self.recorder.cmds)
 
-    def note(self, text: str):
+    def note(self, text: str, slide_number: int | None = None):
         """Label the current step (e.g. "slide 12: Scoring"); it heads that
-        step's file in the export, so a person can find it. No-op natively."""
+        step's file in the export, so a person can find it. `slide_number`:
+        this step begins the slide shown as that number, so the page opens
+        there from `main.html#12` (and `#12.2` is two clicks into it).
+        No-op natively."""
         if self.recorder is not None:
-            self.recorder.note(text)
+            self.recorder.note(text, slide_number)
 
     @classmethod
     def export(cls, out, title: str | None = None, quiet: bool = False, readable: bool = True):

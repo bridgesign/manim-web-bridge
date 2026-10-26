@@ -167,7 +167,7 @@ def _readable_chunk(k: int, n: int, chunk: dict, names: list, state_names: dict,
             cmds.append((f'{{"op": "play", "T": {_j(cmd["T"])}, "tr": [\n{body}\n    ]}}', ""))
         else:
             cmds.append((_j(cmd), ""))
-    flags = "".join(f'  "{key}": {_j(step[key])},\n' for key in ("note", "loop", "auto") if key in step)
+    flags = "".join(f'  "{key}": {_j(step[key])},\n' for key in ("note", "number", "loop", "auto") if key in step)
     end = _commented(_by_name(step["end"], lambda p: name(p[0])), "    ")
     states = _commented([(f'"{i}": {_j(v)}', state_names.get(int(i), "")) for i, v in chunk["states"].items()], "  ")
     geoms = _commented([(f'"{i}": {_j(v)}', "") for i, v in chunk["geoms"].items()], "  ")
@@ -281,6 +281,8 @@ def write_site(data: dict, folder, title: str = "Slides", readable: bool = True)
 
     head = {"version": 2, "build": build, "frame": data["frame"], "background": data["background"],
             "images": images, "videos": videos, "deps": deps}
+    if any("number" in s for s in steps):        # which slide number each step begins (for #<slide>)
+        head["numbers"] = [s.get("number") for s in steps]
     w, h = data["frame"]
     index = folder / "main.html"
     index.write_text(PAGE.format(
